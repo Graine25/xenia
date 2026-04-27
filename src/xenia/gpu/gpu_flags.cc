@@ -23,17 +23,19 @@ DEFINE_bool(vsync, true, "Enable VSYNC.", "GPU");
 DEFINE_bool(
     dump_textures, false,
     "Dump decoded game textures as PNG files to the Dumps/Textures folder,\n"
-    "named by a hash of the texture key. Only 2D single-layer textures whose\n"
-    "host format is R8G8B8A8 are captured (k_8_8_8_8, DXT1/3/5). The dump\n"
-    "happens via GPU readback, so the PNG shows the fully decoded pixels.\n"
-    "Can be used directly as a base for creating texture replacements.",
+    "named by a hash of the texture key. 2D, 2D array, and cubemap textures\n"
+    "in common RGBA, BC, R/RG, 16-bit packed, and 10:10:10:2 host formats are\n"
+    "captured via GPU readback. Array layers use _layerN suffixes, cubemap\n"
+    "faces use _faceN suffixes. The PNG shows the fully decoded pixels and\n"
+    "can be used directly as a base for creating texture replacements.",
     "GPU");
 
 DEFINE_bool(
     load_texture_replacements, false,
     "Load PNG replacement textures from the Dumps/Textures folder. Place a\n"
-    "PNG file named {hash:016X}.png in that folder to replace a texture.\n"
-    "The hash is the same as the PNG filename produced by dump_textures.",
+    "PNG file named {hash:016X}.png in that folder to replace a texture. For\n"
+    "array and cubemap replacements, provide the _layerN or _faceN PNG files\n"
+    "produced by dump_textures. The hash is the same as the dump filename.",
     "GPU");
 
 DEFINE_uint64(framerate_limit, 0,

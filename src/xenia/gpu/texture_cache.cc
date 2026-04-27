@@ -20,6 +20,7 @@
 #include "xenia/base/xxhash.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/shared_memory.h"
+#include "xenia/gpu/texture_dump.h"
 
 DEFINE_int32(
     draw_resolution_scale_x, 1,
@@ -829,7 +830,7 @@ bool TextureCache::LoadTextureData(Texture& texture) {
   TextureKey texture_key = texture.key();
 
   // Compute the hash used for dump/replacement filenames.
-  // The hash is stable across runs (same TextureKey → same hash).
+  // The hash is stable across runs (same TextureKey -> same hash).
   uint64_t texture_hash = XXH3_64bits(&texture_key, sizeof(texture_key));
 
   // Try loading a replacement PNG before touching guest memory.
@@ -837,7 +838,20 @@ bool TextureCache::LoadTextureData(Texture& texture) {
     std::filesystem::path replacement_path =
         xe::filesystem::GetExecutableFolder() / "Dumps" / "Textures" /
         fmt::format("{:016X}.png", texture_hash);
-    if (std::filesystem::exists(replacement_path)) {
+    uint32_t layer_count = texture_key.GetDepthOrArraySize();
+    bool is_cube = texture_key.dimension == xenos::DataDimension::kCube;
+    bool replacement_exists = false;
+    if (is_cube && layer_count == 6u) {
+      replacement_exists = std::filesystem::exists(
+          TextureDumpSubresourcePath(replacement_path, "face", 0));
+    } else if (texture_key.dimension == xenos::DataDimension::k2DOrStacked &&
+               layer_count > 1u) {
+      replacement_exists = std::filesystem::exists(
+          TextureDumpSubresourcePath(replacement_path, "layer", 0));
+    } else {
+      replacement_exists = std::filesystem::exists(replacement_path);
+    }
+    if (replacement_exists) {
       if (LoadTextureFromFile(texture, replacement_path)) {
         texture.MakeUpToDateAndWatch(global_critical_region_.Acquire());
         texture.LogAction("Loaded from replacement");
@@ -928,7 +942,30 @@ bool TextureCache::LoadTextureData(Texture& texture) {
         xe::filesystem::GetExecutableFolder() / "Dumps" / "Textures";
     std::filesystem::path dump_path =
         dump_dir / fmt::format("{:016X}.png", texture_hash);
-    if (!std::filesystem::exists(dump_path)) {
+    uint32_t layer_count = texture_key.GetDepthOrArraySize();
+    bool is_cube = texture_key.dimension == xenos::DataDimension::kCube;
+    bool dump_exists = std::filesystem::exists(dump_path);
+    if (is_cube && layer_count == 6u) {
+      dump_exists = true;
+      for (uint32_t face = 0; face < layer_count; ++face) {
+        if (!std::filesystem::exists(
+                TextureDumpSubresourcePath(dump_path, "face", face))) {
+          dump_exists = false;
+          break;
+        }
+      }
+    } else if (texture_key.dimension == xenos::DataDimension::k2DOrStacked &&
+               layer_count > 1u) {
+      dump_exists = true;
+      for (uint32_t layer = 0; layer < layer_count; ++layer) {
+        if (!std::filesystem::exists(
+                TextureDumpSubresourcePath(dump_path, "layer", layer))) {
+          dump_exists = false;
+          break;
+        }
+      }
+    }
+    if (!dump_exists) {
       std::filesystem::create_directories(dump_dir);
       ScheduleTextureDump(texture, dump_path);
     }

@@ -593,9 +593,10 @@ class TextureCache {
                                                      bool load_base,
                                                      bool load_mips) = 0;
 
-  // Loads a texture from a PNG file into the GPU texture resource.
+  // Loads a texture from PNG file(s) into the GPU texture resource.
   // Called when load_texture_replacements is enabled and a matching PNG file
-  // is found. The PNG must be an RGBA8 image matching the texture dimensions.
+  // is found. Layered textures use sibling files with layer/face suffixes.
+  // The PNG must be an RGBA8 image matching the texture dimensions.
   // Returns true if the texture was successfully uploaded from the file.
   virtual bool LoadTextureFromFile(Texture& texture,
                                    const std::filesystem::path& path) {

@@ -19,6 +19,7 @@
 
 #include "xenia/base/hash.h"
 #include "xenia/gpu/texture_cache.h"
+#include "xenia/gpu/texture_dump.h"
 #include "xenia/gpu/vulkan/vulkan_shader.h"
 #include "xenia/gpu/vulkan/vulkan_shared_memory.h"
 #include "xenia/ui/vulkan/vulkan_mem_alloc.h"
@@ -472,9 +473,8 @@ class VulkanTextureCache final : public TextureCache {
     std::filesystem::path dump_path;
     uint32_t width;
     uint32_t height;
-    uint32_t row_pitch;           // bytes per RGBA8 row or per BC block-row
-    uint32_t bc_bytes_per_block;  // 0 = RGBA8, 8 = BC1, 16 = BC2/BC3
-    bool is_bc3;                  // for 16bpb: true = BC3, false = BC2
+    uint32_t row_pitch;
+    DumpPixelFormat pixel_format;
   };
   std::deque<PendingTextureDump> pending_texture_dumps_;
 
