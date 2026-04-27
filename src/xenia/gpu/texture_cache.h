@@ -14,8 +14,10 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/hash.h"
@@ -160,7 +162,7 @@ class TextureCache {
                                  // of the structure is 0x28
   }
 
- protected:
+ public:
   struct TextureKey {
     // Dimensions minus 1 are stored similarly to how they're stored in fetch
     // constants so fewer bits can be used, while the maximum size (8192 for 2D)
@@ -231,6 +233,7 @@ class TextureCache {
     void LogAction(const char* action) const;
   };
 
+ protected:
   class Texture {
    public:
     Texture(const Texture& texture) = delete;
@@ -590,6 +593,21 @@ class TextureCache {
                                                      bool load_base,
                                                      bool load_mips) = 0;
 
+  // Loads a texture from a PNG file into the GPU texture resource.
+  // Called when load_texture_replacements is enabled and a matching PNG file
+  // is found. The PNG must be an RGBA8 image matching the texture dimensions.
+  // Returns true if the texture was successfully uploaded from the file.
+  virtual bool LoadTextureFromFile(Texture& texture,
+                                   const std::filesystem::path& path) {
+    return false;
+  }
+
+  // Called after a texture has been successfully loaded from guest memory.
+  // Implementations may schedule a GPU readback and write the decoded result
+  // as a PNG to |dump_path| once the current GPU submission completes.
+  virtual void ScheduleTextureDump(Texture& texture,
+                                   const std::filesystem::path& dump_path) {}
+
   // Converts a texture fetch constant to a texture key, normalizing and
   // validating the values, or creating an invalid key, and also gets the
   // post-guest-swizzle signedness.
@@ -657,6 +675,9 @@ class TextureCache {
 
   std::unordered_map<TextureKey, std::unique_ptr<Texture>, TextureKey::Hasher>
       textures_;
+
+  // Tracks hashes of textures already dumped this session (avoids re-dumping).
+  std::unordered_set<uint64_t> dumped_texture_hashes_;
 
   uint64_t textures_total_host_memory_usage_ = 0;
 

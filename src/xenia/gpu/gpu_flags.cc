@@ -20,6 +20,22 @@ DEFINE_path(
 
 DEFINE_bool(vsync, true, "Enable VSYNC.", "GPU");
 
+DEFINE_bool(
+    dump_textures, false,
+    "Dump decoded game textures as PNG files to the Dumps/Textures folder,\n"
+    "named by a hash of the texture key. Only 2D single-layer textures whose\n"
+    "host format is R8G8B8A8 are captured (k_8_8_8_8, DXT1/3/5). The dump\n"
+    "happens via GPU readback, so the PNG shows the fully decoded pixels.\n"
+    "Can be used directly as a base for creating texture replacements.",
+    "GPU");
+
+DEFINE_bool(
+    load_texture_replacements, false,
+    "Load PNG replacement textures from the Dumps/Textures folder. Place a\n"
+    "PNG file named {hash:016X}.png in that folder to replace a texture.\n"
+    "The hash is the same as the PNG filename produced by dump_textures.",
+    "GPU");
+
 DEFINE_uint64(framerate_limit, 0,
               "Maximum frames per second. 0 = Unlimited frames.\n"
               "Defaults to 60, when set to 0, and VSYNC is enabled.",

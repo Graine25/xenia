@@ -11,6 +11,8 @@
 #define XENIA_GPU_D3D12_D3D12_TEXTURE_CACHE_H_
 
 #include <array>
+#include <deque>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <unordered_map>
@@ -538,6 +540,12 @@ class D3D12TextureCache final : public TextureCache {
   bool LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
                                              bool load_mips) override;
 
+  bool LoadTextureFromFile(Texture& texture,
+                           const std::filesystem::path& path) override;
+
+  void ScheduleTextureDump(Texture& texture,
+                           const std::filesystem::path& dump_path) override;
+
   void UpdateTextureBindingsImpl(uint32_t fetch_constant_mask) override;
 
  private:
@@ -878,6 +886,28 @@ class D3D12TextureCache final : public TextureCache {
                                               kMaxDrawResolutionScaleAlongAxis +
                                           ((uint32_t(1) << 30) - 1)) >>
                                          30];
+  // Upload buffers for pending texture replacements, kept alive until the
+  // GPU submission that used them has completed.
+  struct PendingTextureReplacement {
+    uint64_t submission_index;
+    Microsoft::WRL::ComPtr<ID3D12Resource> upload_buffer;
+  };
+  std::deque<PendingTextureReplacement> pending_texture_replacements_;
+
+  // Readback buffers for pending texture dumps, written once the GPU
+  // submission that populated them has completed.
+  struct PendingTextureDump {
+    uint64_t submission_index;
+    Microsoft::WRL::ComPtr<ID3D12Resource> readback_buffer;
+    std::filesystem::path dump_path;
+    uint32_t width;
+    uint32_t height;
+    uint32_t row_pitch;         // bytes per RGBA8 row or per BC block-row
+    uint32_t bc_bytes_per_block;  // 0 = RGBA8, 8 = BC1, 16 = BC2/BC3
+    bool is_bc3;                  // for 16bpb: true = BC3, false = BC2
+  };
+  std::deque<PendingTextureDump> pending_texture_dumps_;
+
   // Range used in the last successful MakeScaledResolveRangeCurrent call.
   uint64_t scaled_resolve_current_range_start_scaled_;
   uint64_t scaled_resolve_current_range_length_scaled_;

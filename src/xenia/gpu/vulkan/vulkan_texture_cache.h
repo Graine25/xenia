@@ -11,6 +11,8 @@
 #define XENIA_GPU_VULKAN_VULKAN_TEXTURE_CACHE_H_
 
 #include <array>
+#include <deque>
+#include <filesystem>
 #include <memory>
 #include <unordered_map>
 #include <utility>
@@ -202,6 +204,12 @@ class VulkanTextureCache final : public TextureCache {
 
   bool LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
                                              bool load_mips) override;
+
+  bool LoadTextureFromFile(Texture& texture,
+                           const std::filesystem::path& path) override;
+
+  void ScheduleTextureDump(Texture& texture,
+                           const std::filesystem::path& dump_path) override;
 
   bool EnsureScaledResolveMemoryCommitted(
       uint32_t start_unscaled, uint32_t length_unscaled,
@@ -445,6 +453,30 @@ class VulkanTextureCache final : public TextureCache {
   uint64_t scaled_resolve_current_range_start_scaled_ = 0;
   uint64_t scaled_resolve_current_range_length_scaled_ = 0;
   size_t scaled_resolve_current_buffer_index_ = SIZE_MAX;
+
+  // Upload buffers for pending texture replacements, kept alive until the GPU
+  // submission that used them has completed.
+  struct PendingTextureReplacement {
+    uint64_t submission_index;
+    VkBuffer staging_buffer;
+    VkDeviceMemory staging_memory;
+  };
+  std::deque<PendingTextureReplacement> pending_texture_replacements_;
+
+  // Readback buffers for pending texture dumps, written once the GPU
+  // submission that populated them has completed.
+  struct PendingTextureDump {
+    uint64_t submission_index;
+    VkBuffer readback_buffer;
+    VkDeviceMemory readback_memory;
+    std::filesystem::path dump_path;
+    uint32_t width;
+    uint32_t height;
+    uint32_t row_pitch;           // bytes per RGBA8 row or per BC block-row
+    uint32_t bc_bytes_per_block;  // 0 = RGBA8, 8 = BC1, 16 = BC2/BC3
+    bool is_bc3;                  // for 16bpb: true = BC3, false = BC2
+  };
+  std::deque<PendingTextureDump> pending_texture_dumps_;
 
   // Sparse scaled resolve (overlapping 2GB windows)
   bool sparse_scaled_resolve_supported_ = false;

@@ -9,11 +9,15 @@
 
 #include "xenia/gpu/texture_cache.h"
 
+#include <filesystem>
+
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/xxhash.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/shared_memory.h"
 
@@ -824,6 +828,28 @@ bool TextureCache::LoadTextureData(Texture& texture) {
 
   TextureKey texture_key = texture.key();
 
+  // Compute the hash used for dump/replacement filenames.
+  // The hash is stable across runs (same TextureKey → same hash).
+  uint64_t texture_hash = XXH3_64bits(&texture_key, sizeof(texture_key));
+
+  // Try loading a replacement PNG before touching guest memory.
+  if (cvars::load_texture_replacements) {
+    std::filesystem::path replacement_path =
+        xe::filesystem::GetExecutableFolder() / "Dumps" / "Textures" /
+        fmt::format("{:016X}.png", texture_hash);
+    if (std::filesystem::exists(replacement_path)) {
+      if (LoadTextureFromFile(texture, replacement_path)) {
+        texture.MakeUpToDateAndWatch(global_critical_region_.Acquire());
+        texture.LogAction("Loaded from replacement");
+        return true;
+      }
+      XELOGW(
+          "TextureCache: replacement PNG found but failed to load for "
+          "texture {:016X}",
+          texture_hash);
+    }
+  }
+
   // Implementation may load multiple blocks at once via accesses of up to 128
   // bits (R32G32B32A32_UINT), so aligning the size to this value to make sure
   // if the texture is small (especially if it's linear), the last blocks won't
@@ -892,6 +918,22 @@ bool TextureCache::LoadTextureData(Texture& texture) {
   texture.MakeUpToDateAndWatch(global_critical_region_.Acquire());
 
   texture.LogAction("Loaded");
+
+  // Schedule a GPU readback to dump the decoded texture as PNG if requested
+  // and not already dumped this session.
+  if (cvars::dump_textures && texture_key.base_page != 0 &&
+      texture.GetGuestBaseSize() > 0 &&
+      dumped_texture_hashes_.count(texture_hash) == 0) {
+    std::filesystem::path dump_dir =
+        xe::filesystem::GetExecutableFolder() / "Dumps" / "Textures";
+    std::filesystem::path dump_path =
+        dump_dir / fmt::format("{:016X}.png", texture_hash);
+    if (!std::filesystem::exists(dump_path)) {
+      std::filesystem::create_directories(dump_dir);
+      ScheduleTextureDump(texture, dump_path);
+    }
+    dumped_texture_hashes_.insert(texture_hash);
+  }
 
   return true;
 }

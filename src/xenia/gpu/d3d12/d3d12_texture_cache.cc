@@ -14,13 +14,16 @@
 #include <cstddef>
 #include <cstring>
 
+#include "third_party/stb/stb_image.h"
 #include "xenia/base/assert.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
 #include "xenia/gpu/d3d12/d3d12_shared_memory.h"
 #include "xenia/gpu/gpu_flags.h"
+#include "xenia/gpu/texture_dump.h"
 #include "xenia/gpu/texture_info.h"
 #include "xenia/gpu/texture_util.h"
 #include "xenia/gpu/xenos.h"
@@ -433,6 +436,35 @@ void D3D12TextureCache::ClearCache() {
 
 void D3D12TextureCache::BeginSubmission(uint64_t new_submission_index) {
   TextureCache::BeginSubmission(new_submission_index);
+
+  // Release upload buffers for texture replacements whose GPU submission has
+  // completed.
+  uint64_t completed = command_processor_.GetCompletedSubmission();
+  while (!pending_texture_replacements_.empty() &&
+         pending_texture_replacements_.front().submission_index <=
+             completed) {
+    pending_texture_replacements_.pop_front();
+  }
+
+  // Write PNG dumps for completed texture readbacks.
+  while (!pending_texture_dumps_.empty() &&
+         pending_texture_dumps_.front().submission_index <= completed) {
+    const PendingTextureDump& dump = pending_texture_dumps_.front();
+    void* mapped = nullptr;
+    if (SUCCEEDED(dump.readback_buffer->Map(0, nullptr, &mapped))) {
+      const auto* data = reinterpret_cast<const uint8_t*>(mapped);
+      if (dump.bc_bytes_per_block == 0) {
+        TextureDumpWritePng(dump.dump_path, data, dump.width, dump.height,
+                            dump.row_pitch);
+      } else {
+        TextureDumpBcToPng(dump.dump_path, data, dump.row_pitch, dump.width,
+                           dump.height, dump.bc_bytes_per_block, dump.is_bc3);
+      }
+      D3D12_RANGE empty_range = {0, 0};
+      dump.readback_buffer->Unmap(0, &empty_range);
+    }
+    pending_texture_dumps_.pop_front();
+  }
 
   // ExecuteCommandLists is a full UAV and aliasing barrier.
   if (IsDrawResolutionScaled()) {
@@ -1938,6 +1970,281 @@ xenos::ClampMode D3D12TextureCache::NormalizeClampMode(
     return xenos::ClampMode::kMirrorClampToEdge;
   }
   return clamp_mode;
+}
+
+bool D3D12TextureCache::LoadTextureFromFile(
+    Texture& texture, const std::filesystem::path& path) {
+  D3D12Texture& d3d12_texture = static_cast<D3D12Texture&>(texture);
+  TextureKey texture_key = d3d12_texture.key();
+
+  // Only handle base 2D textures for replacement - no mipmaps or 3D/cube.
+  if (texture_key.dimension != xenos::DataDimension::k2DOrStacked ||
+      texture_key.GetDepthOrArraySize() != 1) {
+    return false;
+  }
+
+  // Only support formats that the D3D12 backend stores as R8G8B8A8_UNORM.
+  DXGI_FORMAT resource_format = GetDXGIResourceFormat(texture_key);
+  if (resource_format != DXGI_FORMAT_R8G8B8A8_TYPELESS &&
+      resource_format != DXGI_FORMAT_R8G8B8A8_UNORM) {
+    return false;
+  }
+
+  uint32_t texture_width = texture_key.GetWidth();
+  uint32_t texture_height = texture_key.GetHeight();
+
+  // Load the PNG file.
+  FILE* file = xe::filesystem::OpenFile(path, "rb");
+  if (!file) {
+    return false;
+  }
+  int png_width, png_height, png_channels;
+  stbi_uc* pixels =
+      stbi_load_from_file(file, &png_width, &png_height, &png_channels, 4);
+  fclose(file);
+  if (!pixels) {
+    XELOGW("D3D12TextureCache: Failed to decode PNG replacement: {}",
+           path.string());
+    return false;
+  }
+
+  // If the PNG doesn't match the texture dimensions, resize it automatically.
+  stbi_uc* final_pixels = pixels;
+  bool pixels_need_free = true;
+  std::vector<uint8_t> resized_pixels;
+  if (static_cast<uint32_t>(png_width) != texture_width ||
+      static_cast<uint32_t>(png_height) != texture_height) {
+    XELOGW(
+        "D3D12TextureCache: PNG replacement size {}x{} does not match texture "
+        "{}x{}; resizing.",
+        png_width, png_height, texture_width, texture_height);
+    resized_pixels = TextureDumpResizeRgba(pixels, png_width, png_height,
+                                           texture_width, texture_height);
+    stbi_image_free(pixels);
+    pixels_need_free = false;
+    if (resized_pixels.empty()) {
+      return false;
+    }
+    final_pixels = resized_pixels.data();
+  }
+
+  // Create and fill an upload (CPU-accessible) buffer.
+  const ui::d3d12::D3D12Provider& provider =
+      command_processor_.GetD3D12Provider();
+  ID3D12Device* device = provider.GetDevice();
+
+  uint32_t mip_count = texture_key.mip_max_level + 1;
+
+  // Generate mip chain from the PNG (if the texture has mipmaps).
+  std::vector<std::vector<uint8_t>> mip_levels;
+  if (mip_count > 1) {
+    mip_levels = TextureDumpGenerateMips(final_pixels, texture_width,
+                                         texture_height, mip_count - 1);
+  }
+
+  // Get the copyable footprint for all subresources so we know offsets/pitches.
+  D3D12_RESOURCE_DESC texture_desc;
+  texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  texture_desc.Alignment = 0;
+  texture_desc.Width = texture_width;
+  texture_desc.Height = texture_height;
+  texture_desc.DepthOrArraySize = 1;
+  texture_desc.MipLevels = mip_count;
+  texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  texture_desc.SampleDesc = {1, 0};
+  texture_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  texture_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+  std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(mip_count);
+  UINT64 upload_size;
+  device->GetCopyableFootprints(&texture_desc, 0, mip_count, 0,
+                                footprints.data(), nullptr, nullptr,
+                                &upload_size);
+
+  D3D12_RESOURCE_DESC upload_buffer_desc;
+  ui::d3d12::util::FillBufferResourceDesc(upload_buffer_desc, upload_size,
+                                          D3D12_RESOURCE_FLAG_NONE);
+  Microsoft::WRL::ComPtr<ID3D12Resource> upload_buffer;
+  if (FAILED(device->CreateCommittedResource(
+          &ui::d3d12::util::kHeapPropertiesUpload,
+          provider.GetHeapFlagCreateNotZeroed(), &upload_buffer_desc,
+          D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+          IID_PPV_ARGS(&upload_buffer)))) {
+    XELOGE("D3D12TextureCache: Failed to create upload buffer for replacement");
+    if (pixels_need_free) stbi_image_free(pixels);
+    return false;
+  }
+
+  // Map and copy all mip levels respecting D3D12 pitch alignment.
+  D3D12_RANGE read_range = {0, 0};
+  void* mapped = nullptr;
+  if (FAILED(upload_buffer->Map(0, &read_range, &mapped))) {
+    XELOGE("D3D12TextureCache: Failed to map upload buffer for replacement");
+    if (pixels_need_free) stbi_image_free(pixels);
+    return false;
+  }
+  for (uint32_t mip = 0; mip < mip_count; ++mip) {
+    uint32_t mip_w = std::max(1u, texture_width >> mip);
+    uint32_t mip_h = std::max(1u, texture_height >> mip);
+    const uint8_t* src =
+        (mip == 0) ? final_pixels : mip_levels[mip - 1].data();
+    uint32_t row_pitch =
+        static_cast<uint32_t>(footprints[mip].Footprint.RowPitch);
+    uint8_t* dst =
+        reinterpret_cast<uint8_t*>(mapped) + footprints[mip].Offset;
+    for (uint32_t y = 0; y < mip_h; ++y) {
+      std::memcpy(dst + y * row_pitch, src + y * mip_w * 4u, mip_w * 4u);
+    }
+  }
+  upload_buffer->Unmap(0, nullptr);
+  if (pixels_need_free) stbi_image_free(pixels);
+
+  // Issue GPU copies from the upload buffer to the texture resource.
+  DeferredCommandList& command_list =
+      command_processor_.GetDeferredCommandList();
+  ID3D12Resource* texture_resource = d3d12_texture.resource();
+  d3d12_texture.MarkAsUsed();
+  command_processor_.PushTransitionBarrier(
+      texture_resource,
+      d3d12_texture.SetResourceState(D3D12_RESOURCE_STATE_COPY_DEST),
+      D3D12_RESOURCE_STATE_COPY_DEST);
+  command_processor_.SubmitBarriers();
+
+  for (uint32_t mip = 0; mip < mip_count; ++mip) {
+    D3D12_TEXTURE_COPY_LOCATION location_dest;
+    location_dest.pResource = texture_resource;
+    location_dest.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    location_dest.SubresourceIndex = mip;
+
+    D3D12_TEXTURE_COPY_LOCATION location_source;
+    location_source.pResource = upload_buffer.Get();
+    location_source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    location_source.PlacedFootprint = footprints[mip];
+
+    command_list.D3DCopyTextureRegion(&location_dest, 0, 0, 0, &location_source,
+                                      nullptr);
+  }
+
+  // Keep the upload buffer alive until the submission completes.
+  PendingTextureReplacement pending;
+  pending.submission_index = command_processor_.GetCurrentSubmission();
+  pending.upload_buffer = std::move(upload_buffer);
+  pending_texture_replacements_.push_back(std::move(pending));
+
+  return true;
+}
+
+void D3D12TextureCache::ScheduleTextureDump(
+    Texture& texture, const std::filesystem::path& dump_path) {
+  D3D12Texture& d3d12_texture = static_cast<D3D12Texture&>(texture);
+  TextureKey texture_key = d3d12_texture.key();
+
+  // Only handle 2D single-layer textures.
+  if (texture_key.dimension != xenos::DataDimension::k2DOrStacked ||
+      texture_key.GetDepthOrArraySize() != 1) {
+    return;
+  }
+
+  // Determine host format and BC info.
+  DXGI_FORMAT resource_format = GetDXGIResourceFormat(texture_key);
+  DXGI_FORMAT readback_format;
+  uint32_t bc_bytes_per_block = 0;
+  bool is_bc3 = false;
+  if (resource_format == DXGI_FORMAT_R8G8B8A8_TYPELESS ||
+      resource_format == DXGI_FORMAT_R8G8B8A8_UNORM) {
+    readback_format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  } else if (resource_format == DXGI_FORMAT_BC1_UNORM ||
+             resource_format == DXGI_FORMAT_BC1_TYPELESS) {
+    readback_format = DXGI_FORMAT_BC1_UNORM;
+    bc_bytes_per_block = 8;
+  } else if (resource_format == DXGI_FORMAT_BC2_UNORM ||
+             resource_format == DXGI_FORMAT_BC2_TYPELESS) {
+    readback_format = DXGI_FORMAT_BC2_UNORM;
+    bc_bytes_per_block = 16;
+  } else if (resource_format == DXGI_FORMAT_BC3_UNORM ||
+             resource_format == DXGI_FORMAT_BC3_TYPELESS) {
+    readback_format = DXGI_FORMAT_BC3_UNORM;
+    bc_bytes_per_block = 16;
+    is_bc3 = true;
+  } else {
+    return;
+  }
+
+  uint32_t width = texture_key.GetWidth();
+  uint32_t height = texture_key.GetHeight();
+
+  const ui::d3d12::D3D12Provider& provider =
+      command_processor_.GetD3D12Provider();
+  ID3D12Device* device = provider.GetDevice();
+
+  // Calculate the readback footprint for subresource 0 using the correct
+  // resource format (so GetCopyableFootprints returns BC row pitch when needed).
+  D3D12_RESOURCE_DESC tex_desc;
+  tex_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  tex_desc.Alignment = 0;
+  tex_desc.Width = width;
+  tex_desc.Height = height;
+  tex_desc.DepthOrArraySize = 1;
+  tex_desc.MipLevels = 1;
+  tex_desc.Format = readback_format;
+  tex_desc.SampleDesc = {1, 0};
+  tex_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  tex_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT readback_footprint;
+  UINT64 readback_size;
+  device->GetCopyableFootprints(&tex_desc, 0, 1, 0, &readback_footprint,
+                                nullptr, nullptr, &readback_size);
+
+  // Create a READBACK heap buffer.
+  D3D12_RESOURCE_DESC readback_desc;
+  ui::d3d12::util::FillBufferResourceDesc(readback_desc, readback_size,
+                                          D3D12_RESOURCE_FLAG_NONE);
+  Microsoft::WRL::ComPtr<ID3D12Resource> readback_buffer;
+  if (FAILED(device->CreateCommittedResource(
+          &ui::d3d12::util::kHeapPropertiesReadback,
+          provider.GetHeapFlagCreateNotZeroed(), &readback_desc,
+          D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+          IID_PPV_ARGS(&readback_buffer)))) {
+    XELOGE(
+        "D3D12TextureCache: Failed to create readback buffer for texture dump");
+    return;
+  }
+
+  // Transition texture to COPY_SOURCE and copy subresource 0 to the readback
+  // buffer. The texture is currently in COPY_DEST after the load shader.
+  DeferredCommandList& command_list =
+      command_processor_.GetDeferredCommandList();
+  ID3D12Resource* texture_resource = d3d12_texture.resource();
+  command_processor_.PushTransitionBarrier(
+      texture_resource,
+      d3d12_texture.SetResourceState(D3D12_RESOURCE_STATE_COPY_SOURCE),
+      D3D12_RESOURCE_STATE_COPY_SOURCE);
+  command_processor_.SubmitBarriers();
+
+  D3D12_TEXTURE_COPY_LOCATION src_loc;
+  src_loc.pResource = texture_resource;
+  src_loc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  src_loc.SubresourceIndex = 0;
+
+  D3D12_TEXTURE_COPY_LOCATION dst_loc;
+  dst_loc.pResource = readback_buffer.Get();
+  dst_loc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  dst_loc.PlacedFootprint = readback_footprint;
+
+  command_list.D3DCopyTextureRegion(&dst_loc, 0, 0, 0, &src_loc, nullptr);
+
+  // Queue the PNG write to happen once the GPU submission completes.
+  PendingTextureDump pending;
+  pending.submission_index = command_processor_.GetCurrentSubmission();
+  pending.readback_buffer = std::move(readback_buffer);
+  pending.dump_path = dump_path;
+  pending.width = width;
+  pending.height = height;
+  pending.row_pitch = readback_footprint.Footprint.RowPitch;
+  pending.bc_bytes_per_block = bc_bytes_per_block;
+  pending.is_bc3 = is_bc3;
+  pending_texture_dumps_.push_back(std::move(pending));
 }
 
 }  // namespace d3d12

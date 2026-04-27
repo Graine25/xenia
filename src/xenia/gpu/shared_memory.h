@@ -24,6 +24,7 @@ class SharedMemory {
   static constexpr uint32_t kBufferSize = 1 << kBufferSizeLog2;
 
   virtual ~SharedMemory();
+
   // Call in the implementation-specific ClearCache.
   virtual void ClearCache();
   virtual void SetSystemPageBlocksValidWithGpuDataWritten();

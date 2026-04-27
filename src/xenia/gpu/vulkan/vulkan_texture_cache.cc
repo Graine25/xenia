@@ -14,12 +14,15 @@
 #include <cstddef>
 #include <utility>
 
+#include "third_party/stb/stb_image.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
 #include "xenia/gpu/gpu_flags.h"
+#include "xenia/gpu/texture_dump.h"
 #include "xenia/gpu/texture_info.h"
 #include "xenia/gpu/texture_util.h"
 #include "xenia/gpu/vulkan/deferred_command_buffer.h"
@@ -500,6 +503,49 @@ VulkanTextureCache::~VulkanTextureCache() {
 
 void VulkanTextureCache::BeginSubmission(uint64_t new_submission_index) {
   TextureCache::BeginSubmission(new_submission_index);
+
+  // Release staging buffers for texture replacements whose submission is done.
+  {
+    const ui::vulkan::VulkanDevice* const vulkan_device =
+        command_processor_.GetVulkanDevice();
+    const ui::vulkan::VulkanDevice::Functions& dfn =
+        vulkan_device->functions();
+    const VkDevice device = vulkan_device->device();
+    uint64_t completed = command_processor_.GetCompletedSubmission();
+    while (!pending_texture_replacements_.empty() &&
+           pending_texture_replacements_.front().submission_index <=
+               completed) {
+      VkBuffer buf = pending_texture_replacements_.front().staging_buffer;
+      VkDeviceMemory mem = pending_texture_replacements_.front().staging_memory;
+      pending_texture_replacements_.pop_front();
+      dfn.vkDestroyBuffer(device, buf, nullptr);
+      dfn.vkFreeMemory(device, mem, nullptr);
+    }
+
+    // Write PNG dumps for completed texture readbacks.
+    while (!pending_texture_dumps_.empty() &&
+           pending_texture_dumps_.front().submission_index <= completed) {
+      const PendingTextureDump& dump = pending_texture_dumps_.front();
+      void* mapped = nullptr;
+      if (dfn.vkMapMemory(device, dump.readback_memory, 0, VK_WHOLE_SIZE, 0,
+                          &mapped) == VK_SUCCESS) {
+        const auto* data = reinterpret_cast<const uint8_t*>(mapped);
+        if (dump.bc_bytes_per_block == 0) {
+          TextureDumpWritePng(dump.dump_path, data, dump.width, dump.height,
+                              dump.row_pitch);
+        } else {
+          TextureDumpBcToPng(dump.dump_path, data, dump.row_pitch, dump.width,
+                             dump.height, dump.bc_bytes_per_block, dump.is_bc3);
+        }
+        dfn.vkUnmapMemory(device, dump.readback_memory);
+      }
+      VkBuffer rbuf = dump.readback_buffer;
+      VkDeviceMemory rmem = dump.readback_memory;
+      pending_texture_dumps_.pop_front();
+      dfn.vkDestroyBuffer(device, rbuf, nullptr);
+      dfn.vkFreeMemory(device, rmem, nullptr);
+    }
+  }
 
   if (!null_images_cleared_) {
     VkImage null_images[] = {null_image_2d_array_cube_, null_image_3d_};
@@ -3347,6 +3393,291 @@ bool VulkanTextureCache::MakeScaledResolveRangeCurrentSparse(
 
   scaled_resolve_current_buffer_index_ = chosen_buffer;
   return true;
+}
+
+bool VulkanTextureCache::LoadTextureFromFile(
+    Texture& texture, const std::filesystem::path& path) {
+  VulkanTexture& vulkan_texture = static_cast<VulkanTexture&>(texture);
+  TextureKey texture_key = vulkan_texture.key();
+
+  // Only handle base 2D textures for replacement.
+  if (texture_key.dimension != xenos::DataDimension::k2DOrStacked ||
+      texture_key.GetDepthOrArraySize() != 1) {
+    return false;
+  }
+
+  // Only support textures stored as VK_FORMAT_R8G8B8A8_UNORM on the host.
+  const HostFormatPair& host_format_pair = GetHostFormatPair(texture_key);
+  VkFormat host_format = host_format_pair.format_unsigned.format;
+  if (host_format != VK_FORMAT_R8G8B8A8_UNORM) {
+    return false;
+  }
+
+  uint32_t texture_width = texture_key.GetWidth();
+  uint32_t texture_height = texture_key.GetHeight();
+
+  // Load the PNG file.
+  FILE* file = xe::filesystem::OpenFile(path, "rb");
+  if (!file) {
+    return false;
+  }
+  int png_width, png_height, png_channels;
+  stbi_uc* pixels =
+      stbi_load_from_file(file, &png_width, &png_height, &png_channels, 4);
+  fclose(file);
+  if (!pixels) {
+    XELOGW("VulkanTextureCache: Failed to decode PNG replacement: {}",
+           path.string());
+    return false;
+  }
+
+  // If the PNG doesn't match the texture dimensions, resize it automatically.
+  stbi_uc* final_pixels = pixels;
+  bool pixels_need_free = true;
+  std::vector<uint8_t> resized_pixels;
+  if (static_cast<uint32_t>(png_width) != texture_width ||
+      static_cast<uint32_t>(png_height) != texture_height) {
+    XELOGW(
+        "VulkanTextureCache: PNG replacement size {}x{} does not match texture "
+        "{}x{}; resizing.",
+        png_width, png_height, texture_width, texture_height);
+    resized_pixels = TextureDumpResizeRgba(pixels, png_width, png_height,
+                                           texture_width, texture_height);
+    stbi_image_free(pixels);
+    pixels_need_free = false;
+    if (resized_pixels.empty()) {
+      return false;
+    }
+    final_pixels = resized_pixels.data();
+  }
+
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+
+  uint32_t mip_count = texture_key.mip_max_level + 1;
+
+  // Generate mip chain from the PNG (if the texture has mipmaps).
+  std::vector<std::vector<uint8_t>> mip_levels;
+  if (mip_count > 1) {
+    mip_levels = TextureDumpGenerateMips(final_pixels, texture_width,
+                                         texture_height, mip_count - 1);
+  }
+
+  // Compute staging buffer size: sum of all mip level byte sizes.
+  // Store per-mip offsets for the copy regions.
+  std::vector<VkDeviceSize> mip_offsets(mip_count);
+  VkDeviceSize staging_size = 0;
+  for (uint32_t mip = 0; mip < mip_count; ++mip) {
+    uint32_t mip_w = std::max(1u, texture_width >> mip);
+    uint32_t mip_h = std::max(1u, texture_height >> mip);
+    mip_offsets[mip] = staging_size;
+    staging_size += VkDeviceSize(mip_w) * mip_h * 4u;
+  }
+
+  // Create a host-visible staging buffer.
+  VkBuffer staging_buffer = VK_NULL_HANDLE;
+  VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+  if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
+          vulkan_device, staging_size,
+          VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+          ui::vulkan::util::MemoryPurpose::kUpload, staging_buffer,
+          staging_memory)) {
+    XELOGE(
+        "VulkanTextureCache: Failed to create staging buffer for texture "
+        "replacement");
+    if (pixels_need_free) stbi_image_free(pixels);
+    return false;
+  }
+
+  // Map, copy all mip levels, unmap.
+  void* mapped = nullptr;
+  if (dfn.vkMapMemory(device, staging_memory, 0, staging_size, 0, &mapped) !=
+      VK_SUCCESS) {
+    XELOGE(
+        "VulkanTextureCache: Failed to map staging memory for texture "
+        "replacement");
+    dfn.vkDestroyBuffer(device, staging_buffer, nullptr);
+    dfn.vkFreeMemory(device, staging_memory, nullptr);
+    if (pixels_need_free) stbi_image_free(pixels);
+    return false;
+  }
+  for (uint32_t mip = 0; mip < mip_count; ++mip) {
+    uint32_t mip_w = std::max(1u, texture_width >> mip);
+    uint32_t mip_h = std::max(1u, texture_height >> mip);
+    const uint8_t* src =
+        (mip == 0) ? final_pixels : mip_levels[mip - 1].data();
+    std::memcpy(static_cast<uint8_t*>(mapped) + mip_offsets[mip], src,
+                mip_w * mip_h * 4u);
+  }
+  dfn.vkUnmapMemory(device, staging_memory);
+  if (pixels_need_free) stbi_image_free(pixels);
+
+  // Transition image to TRANSFER_DST_OPTIMAL.
+  vulkan_texture.MarkAsUsed();
+  VulkanTexture::Usage old_usage =
+      vulkan_texture.SetUsage(VulkanTexture::Usage::kTransferDestination);
+  if (old_usage != VulkanTexture::Usage::kTransferDestination) {
+    VkPipelineStageFlags src_stage_mask, dst_stage_mask;
+    VkAccessFlags src_access_mask, dst_access_mask;
+    VkImageLayout old_layout, new_layout;
+    GetTextureUsageMasks(old_usage, src_stage_mask, src_access_mask, old_layout);
+    GetTextureUsageMasks(VulkanTexture::Usage::kTransferDestination,
+                         dst_stage_mask, dst_access_mask, new_layout);
+    command_processor_.PushImageMemoryBarrier(
+        vulkan_texture.image(), ui::vulkan::util::InitializeSubresourceRange(),
+        src_stage_mask, dst_stage_mask, src_access_mask, dst_access_mask,
+        old_layout, new_layout);
+  }
+  command_processor_.SubmitBarriers(true);
+
+  // Build copy regions for all mip levels and issue a single
+  // CopyBufferToImage call.
+  DeferredCommandBuffer& command_buffer =
+      command_processor_.deferred_command_buffer();
+  VkBufferImageCopy* copy_regions =
+      command_buffer.CmdCopyBufferToImageEmplace(
+          staging_buffer, vulkan_texture.image(),
+          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, mip_count);
+  for (uint32_t mip = 0; mip < mip_count; ++mip) {
+    uint32_t mip_w = std::max(1u, texture_width >> mip);
+    uint32_t mip_h = std::max(1u, texture_height >> mip);
+    VkBufferImageCopy& region = copy_regions[mip];
+    region = {};
+    region.bufferOffset = mip_offsets[mip];
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = mip;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = {0, 0, 0};
+    region.imageExtent = {mip_w, mip_h, 1};
+  }
+
+  // Keep the staging buffer alive until the submission completes.
+  PendingTextureReplacement pending;
+  pending.submission_index = command_processor_.GetCurrentSubmission();
+  pending.staging_buffer = staging_buffer;
+  pending.staging_memory = staging_memory;
+  pending_texture_replacements_.push_back(std::move(pending));
+
+  return true;
+}
+
+void VulkanTextureCache::ScheduleTextureDump(
+    Texture& texture, const std::filesystem::path& dump_path) {
+  VulkanTexture& vulkan_texture = static_cast<VulkanTexture&>(texture);
+  TextureKey texture_key = vulkan_texture.key();
+
+  // Only handle 2D single-layer textures.
+  if (texture_key.dimension != xenos::DataDimension::k2DOrStacked ||
+      texture_key.GetDepthOrArraySize() != 1) {
+    return;
+  }
+
+  // Determine host format and BC info.
+  const HostFormatPair& host_format_pair = GetHostFormatPair(texture_key);
+  VkFormat host_vk_format = host_format_pair.format_unsigned.format;
+  uint32_t bc_bytes_per_block = 0;
+  bool is_bc3 = false;
+  if (host_vk_format == VK_FORMAT_R8G8B8A8_UNORM) {
+    // bc_bytes_per_block remains 0
+  } else if (host_vk_format == VK_FORMAT_BC1_RGBA_UNORM_BLOCK) {
+    bc_bytes_per_block = 8;
+  } else if (host_vk_format == VK_FORMAT_BC2_UNORM_BLOCK) {
+    bc_bytes_per_block = 16;
+  } else if (host_vk_format == VK_FORMAT_BC3_UNORM_BLOCK) {
+    bc_bytes_per_block = 16;
+    is_bc3 = true;
+  } else {
+    return;
+  }
+
+  uint32_t width = texture_key.GetWidth();
+  uint32_t height = texture_key.GetHeight();
+
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+
+  // Compute readback size and row pitch.
+  uint32_t row_pitch;
+  VkDeviceSize readback_size;
+  if (bc_bytes_per_block == 0) {
+    row_pitch = width * 4u;
+    readback_size = VkDeviceSize(row_pitch) * height;
+  } else {
+    uint32_t blocks_x = (width + 3u) / 4u;
+    uint32_t blocks_y = (height + 3u) / 4u;
+    row_pitch = blocks_x * bc_bytes_per_block;
+    readback_size = VkDeviceSize(row_pitch) * blocks_y;
+  }
+
+  // Create a host-visible readback buffer.
+  VkBuffer readback_buffer = VK_NULL_HANDLE;
+  VkDeviceMemory readback_memory = VK_NULL_HANDLE;
+  if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
+          vulkan_device, readback_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+          ui::vulkan::util::MemoryPurpose::kReadback, readback_buffer,
+          readback_memory)) {
+    XELOGE(
+        "VulkanTextureCache: Failed to create readback buffer for texture "
+        "dump");
+    return;
+  }
+
+  // Transition texture from TRANSFER_DST to TRANSFER_SRC for the readback
+  // copy. The image usage is tracked as kTransferDestination; we'll transition
+  // back so the tracked state remains consistent.
+  DeferredCommandBuffer& command_buffer =
+      command_processor_.deferred_command_buffer();
+  command_processor_.PushImageMemoryBarrier(
+      vulkan_texture.image(), ui::vulkan::util::InitializeSubresourceRange(),
+      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+  command_processor_.SubmitBarriers(true);
+
+  // Copy subresource 0 (mip 0, layer 0) to the readback buffer.
+  // For BC formats, Vulkan tightly packs blocks when bufferRowLength = 0.
+  VkBufferImageCopy region{};
+  region.bufferOffset = 0;
+  region.bufferRowLength = 0;
+  region.bufferImageHeight = 0;
+  region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  region.imageSubresource.mipLevel = 0;
+  region.imageSubresource.baseArrayLayer = 0;
+  region.imageSubresource.layerCount = 1;
+  region.imageOffset = {0, 0, 0};
+  region.imageExtent = {width, height, 1};
+  command_buffer.CmdVkCopyImageToBuffer(vulkan_texture.image(),
+                                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                        readback_buffer, 1, &region);
+
+  // Transition back to TRANSFER_DST_OPTIMAL to keep SetUsage state consistent.
+  command_processor_.PushImageMemoryBarrier(
+      vulkan_texture.image(), ui::vulkan::util::InitializeSubresourceRange(),
+      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+  // Queue the PNG write to happen once the GPU submission completes.
+  PendingTextureDump pending;
+  pending.submission_index = command_processor_.GetCurrentSubmission();
+  pending.readback_buffer = readback_buffer;
+  pending.readback_memory = readback_memory;
+  pending.dump_path = dump_path;
+  pending.width = width;
+  pending.height = height;
+  pending.row_pitch = row_pitch;
+  pending.bc_bytes_per_block = bc_bytes_per_block;
+  pending.is_bc3 = is_bc3;
+  pending_texture_dumps_.push_back(std::move(pending));
 }
 
 }  // namespace vulkan
