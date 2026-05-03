@@ -1,6 +1,7 @@
 name: Orchestrator
 
 on:
+  workflow_dispatch:
   push:
     paths-ignore:
       - '*.md'
@@ -22,7 +23,6 @@ jobs:
   # ===========================================================================
   commit-message:
     name: Commit Message Validation
-    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/Check_commit_message.yml
 
   lint:
@@ -37,13 +37,13 @@ jobs:
   build-windows:
     name: Windows (x86-64)
     needs: [lint, commit-message]
-    if: ${{ !failure() && !cancelled() }}
+    if: ${{ always() && needs.lint.result == 'success' && needs.commit-message.result == 'success' }}
     uses: ./.github/workflows/Windows_x86.yml
 
   build-linux:
     name: Linux (x86-64)
     needs: [lint, commit-message]
-    if: ${{ !failure() && !cancelled() }}
+    if: ${{ always() && needs.lint.result == 'success' && needs.commit-message.result == 'success' }}
     uses: ./.github/workflows/Linux_x86.yml
 
   # Uncomment when platform support is ready:

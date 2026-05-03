@@ -1,7 +1,28 @@
 name: Commit Message Check
 
 on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: 'Optional base ref/SHA to validate from'
+        required: false
+        type: string
+      head:
+        description: 'Optional head ref/SHA to validate to'
+        required: false
+        type: string
   workflow_call:
+    inputs:
+      base:
+        description: 'Optional base ref/SHA to validate from'
+        required: false
+        default: ''
+        type: string
+      head:
+        description: 'Optional head ref/SHA to validate to'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   commit-message:
@@ -14,9 +35,20 @@ jobs:
           fetch-depth: 0
 
       - name: Validate commit messages
+        env:
+          INPUT_BASE: ${{ inputs.base }}
+          INPUT_HEAD: ${{ inputs.head }}
         run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          elif [ -n "${INPUT_BASE}" ]; then
+            BASE="${INPUT_BASE}"
+            HEAD="${INPUT_HEAD:-${GITHUB_SHA}}"
+          else
+            echo "Commit message validation only applies to pull requests unless a base ref/SHA is provided."
+            exit 0
+          fi
 
           COMMITS=$(git log --format="%H %s" "${BASE}..${HEAD}" --)
 
