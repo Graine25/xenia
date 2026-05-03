@@ -1,5 +1,5 @@
 @ECHO OFF
-REM Copyright 2025 Ben Vanik. All Rights Reserved.
+REM Copyright 2015 Ben Vanik. All Rights Reserved.
 
 SET "DIR=%~dp0"
 
@@ -10,17 +10,17 @@ REM ============================================================================
 CALL :check_python
 IF %_RESULT% NEQ 0 (
   ECHO.
-  ECHO Python 3.10+ must be installed and on PATH:
+  ECHO Python 3.4+ must be installed and on PATH:
   ECHO https://www.python.org/
   GOTO :eof
 )
 
 
 REM ============================================================================
-REM Trampoline into xenia-build.py
+REM Trampoline into xenia-build
 REM ============================================================================
 
-"%PYTHON_EXE%" "%DIR%\xenia-build.py" %*
+"%PYTHON_EXE%" "%DIR%\xenia-build" %*
 EXIT /b %ERRORLEVEL%
 
 

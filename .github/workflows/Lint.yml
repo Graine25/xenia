@@ -13,6 +13,8 @@ jobs:
       UBUNTU_BASE: ${{ steps.setup.outputs.UBUNTU_BASE }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Setup
         id: setup
         env:
@@ -26,6 +28,31 @@ jobs:
           sudo apt-get -y update
           sudo apt-get -y install clang-format-$LLVM_VERSION
           sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-$LLVM_VERSION 200
-      - name: Lint
-        run: python3 ./xenia-build lint --all
+      - name: Lint changed files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            BASE="${{ github.event.before }}"
+          else
+            BASE="HEAD"
+          fi
+
+          set +e
+          python3 third_party/clang-format/git-clang-format \
+            --binary=clang-format \
+            --commit="${BASE}" \
+            --style=file \
+            --diff > .clang-format.diff
+          RESULT=$?
+          set -e
+
+          if grep -q "no modified files\|did not modify" .clang-format.diff; then
+            cat .clang-format.diff
+            exit 0
+          fi
+
+          cat .clang-format.diff
+          echo "::error::clang-format reported changes. Run 'xb format' before pushing."
+          exit 1
 
