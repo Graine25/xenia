@@ -1,5 +1,5 @@
 @ECHO OFF
-REM Copyright 2015 Ben Vanik. All Rights Reserved.
+REM Copyright 2025 Ben Vanik. All Rights Reserved.
 
 SET "DIR=%~dp0"
 
@@ -10,17 +10,17 @@ REM ============================================================================
 CALL :check_python
 IF %_RESULT% NEQ 0 (
   ECHO.
-  ECHO Python 3.4+ must be installed and on PATH:
+  ECHO Python 3.10+ must be installed and on PATH:
   ECHO https://www.python.org/
   GOTO :eof
 )
 
 
 REM ============================================================================
-REM Trampoline into xenia-build
+REM Trampoline into xenia-build.py
 REM ============================================================================
 
-"%PYTHON_EXE%" "%DIR%\xenia-build" %*
+"%PYTHON_EXE%" "%DIR%\xenia-build.py" %*
 EXIT /b %ERRORLEVEL%
 
 
@@ -33,19 +33,16 @@ SETLOCAL ENABLEDELAYEDEXPANSION
 
 SET FOUND_PATH=""
 
-SET "CANDIDATE_PATHS[0]=C:\python37\python.exe"
-SET "CANDIDATE_PATHS[1]=C:\python36\python.exe"
-SET "CANDIDATE_PATHS[2]=C:\python35\python.exe"
-SET "CANDIDATE_PATHS[3]=C:\python34\python.exe"
-SET OUTPUT_INDEX=4
+SET "CANDIDATE_PATHS[0]=%WINDIR%\py.exe"
+SET OUTPUT_INDEX=1
 
-FOR /F "usebackq delims=" %%L IN (`2^>NUL where python3`) DO (
+FOR /F "usebackq delims=" %%L IN (`2^>NUL where python`) DO (
   IF %%~zL NEQ 0 (
     SET "CANDIDATE_PATHS[!OUTPUT_INDEX!]=%%L"
     SET /A OUTPUT_INDEX+=1
   )
 )
-FOR /F "usebackq delims=" %%L IN (`2^>NUL where python`) DO (
+FOR /F "usebackq delims=" %%L IN (`2^>NUL where python3`) DO (
   IF %%~zL NEQ 0 (
     SET "CANDIDATE_PATHS[!OUTPUT_INDEX!]=%%L"
     SET /A OUTPUT_INDEX+=1
@@ -68,14 +65,6 @@ SET "FOUND_PATH=%CANDIDATE_PATH%"
 IF "%FOUND_PATH%"=="" (
   ECHO ERROR: no Python executable found on PATH.
   ECHO Make sure you can run 'python' or 'python3' in a Command Prompt.
-  ENDLOCAL & SET _RESULT=1
-  GOTO :eof
-)
-
-CMD /C ""%FOUND_PATH%" -c "import sys; sys.exit(1 if not sys.version_info[:2] ^>= (3, 4) else 0)"
-IF %ERRORLEVEL% NEQ 0 (
-  ECHO ERROR: Python version mismatch, not at least 3.4.
-  ECHO Found Python executable was "%FOUND_PATH%".
   ENDLOCAL & SET _RESULT=1
   GOTO :eof
 )

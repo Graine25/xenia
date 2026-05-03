@@ -153,7 +153,7 @@ filter({"platforms:Linux", "language:C++", "toolset:clang", "files:*.cc or *.cpp
 
 filter("platforms:Windows")
   system("windows")
-  toolset("msc")
+  toolset(os.getenv("XENIA_MSVC_TOOLSET") or "msc")
   buildoptions({
     "/MP",      -- Multiprocessor compilation.
     "/wd4100",  -- Unreferenced parameters are ok.

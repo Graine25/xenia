@@ -197,7 +197,7 @@ class StfsContainerDevice : public Device {
 
   const uint32_t kSTFSHashSpacing = 170;
 
-  const char* ReadMagic(const std::wstring& path);
+  uint32_t ReadMagic(const std::wstring& path);
   bool ResolveFromFolder(const std::wstring& path);
 
   Error MapFiles();

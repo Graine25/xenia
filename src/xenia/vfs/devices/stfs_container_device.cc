@@ -708,11 +708,9 @@ bool StfsHeader::Read(const uint8_t* p) {
   return true;
 }
 
-const char* StfsContainerDevice::ReadMagic(const std::wstring& path) {
+uint32_t StfsContainerDevice::ReadMagic(const std::wstring& path) {
   auto map = MappedMemory::Open(path, MappedMemory::Mode::kRead, 0, 4);
-  auto magic_data = xe::load<uint32_t>(map->data());
-  auto magic_bytes = static_cast<char*>(static_cast<void*>(&magic_data));
-  return std::move(magic_bytes);
+  return xe::load<uint32_t>(map->data());
 }
 
 bool StfsContainerDevice::ResolveFromFolder(const std::wstring& path) {
@@ -738,8 +736,8 @@ bool StfsContainerDevice::ResolveFromFolder(const std::wstring& path) {
       auto path = xe::join_paths(current_file.path, current_file.name);
       auto magic = ReadMagic(path);
 
-      if (memcmp(magic, "LIVE", 4) == 0 || memcmp(magic, "PIRS", 4) == 0 ||
-          memcmp(magic, "CON ", 4) == 0) {
+      if (memcmp(&magic, "LIVE", 4) == 0 || memcmp(&magic, "PIRS", 4) == 0 ||
+          memcmp(&magic, "CON ", 4) == 0) {
         local_path_ = xe::join_paths(current_file.path, current_file.name);
         XELOGI("STFS Package found: %s", xe::to_string(local_path_).c_str());
         return true;

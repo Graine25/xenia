@@ -153,22 +153,54 @@ def import_vs_environment():
     version = int(vswhere[0].get("catalog", {}).get("productLineVersion", 2017))
     install_path = vswhere[0].get("installationPath", None)
 
-  if version < 2017:
+  if install_path:
+    vsdevcmd_path = os.path.join(install_path, 'Common7\\Tools\\VsDevCmd.bat')
+    env_tool_args = [vsdevcmd_path, '-arch=amd64', '-host_arch=amd64']
+  elif version < 2017:
     if 'VS140COMNTOOLS' in os.environ:
       version = 2015
       vcvars_path = os.environ['VS140COMNTOOLS']
-      vcvars_path = os.path.join(tools_path, '..\\..\\vc\\vcvarsall.bat')
+      vcvars_path = os.path.join(vcvars_path, '..\\..\\vc\\vcvarsall.bat')
       env_tool_args = [vcvars_path, 'x64', '&&', 'set']
-  else:
-    vsdevcmd_path = os.path.join(install_path, 'Common7\\Tools\\VsDevCmd.bat')
-    env_tool_args = [vsdevcmd_path, '-arch=amd64', '-host_arch=amd64']
 
-  if version == 0:
+  if version == 0 or env_tool_args is None:
     return None
 
   import_subprocess_environment(env_tool_args)
-  os.environ['VSVERSION'] = str(version)
+  msvc_toolset = find_latest_msvc_toolset(install_path)
+  if msvc_toolset and 'XENIA_MSVC_TOOLSET' not in os.environ:
+    os.environ['XENIA_MSVC_TOOLSET'] = 'msc-' + msvc_toolset
+  # This Premake snapshot only knows up to vs2019. Newer Visual Studio
+  # releases can still build the generated VS2019 projects.
+  if version in (15, 2017):
+    premake_version = 2017
+  elif version in (16, 17, 18) or version > 2019:
+    premake_version = 2019
+  else:
+    premake_version = version
+  os.environ['VSVERSION'] = str(premake_version)
   return version
+
+
+def find_latest_msvc_toolset(install_path):
+  if not install_path:
+    return None
+  vc_msbuild_path = os.path.join(install_path, 'MSBuild\\Microsoft\\VC')
+  if not os.path.isdir(vc_msbuild_path):
+    return None
+
+  toolsets = []
+  for vc_version in os.listdir(vc_msbuild_path):
+    toolset_path = os.path.join(
+        vc_msbuild_path, vc_version, 'Platforms\\x64\\PlatformToolsets')
+    if not os.path.isdir(toolset_path):
+      continue
+    for toolset in os.listdir(toolset_path):
+      if re.match(r'^v\d+$', toolset):
+        toolsets.append(toolset)
+  if not toolsets:
+    return None
+  return sorted(toolsets, key=lambda value: int(value[1:]))[-1]
 
 
 def import_subprocess_environment(args):
