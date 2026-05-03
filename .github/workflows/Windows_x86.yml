@@ -70,24 +70,24 @@ jobs:
         run: git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS
 
       - name: Build Xenia
-        run: python xenia-build.py build --config=Release --target=xenia-app
+        run: .\xb.bat build --config=release --target=src\xenia-app
 
       - name: Prepare artifacts
         id: prepare_artifacts
         run: |
-          if ((Get-Item 'build\bin\Windows\Release\xenia_canary.exe').Length -le 100000) {
+          if ((Get-Item 'build\bin\Windows\Release\xenia.exe').Length -le 100000) {
             echo "::error:: Executable is too small."
             exit 1
           }
-          robocopy . build\bin\Windows\Release                                             LICENSE /r:0 /w:0
-          robocopy   build\bin\Windows\Release artifacts\xenia_canary   xenia_canary.exe   LICENSE /r:0 /w:0
-          If ($LastExitCode -le 7) { echo "LastExitCode = $LastExitCode";$LastExitCode = 0 }
+          New-Item -ItemType Directory -Force artifacts\xenia | Out-Null
+          Copy-Item build\bin\Windows\Release\xenia.exe artifacts\xenia\xenia.exe
+          Copy-Item LICENSE artifacts\xenia\LICENSE
 
       - name: Upload Xenia Canary artifact
         if: steps.prepare_artifacts.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: xenia_canary_windows
-          path: artifacts\xenia_canary
+          path: artifacts\xenia
           if-no-files-found: error
           retention-days: 7
