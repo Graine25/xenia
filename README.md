@@ -9,15 +9,7 @@
 Xenia is an experimental emulator for the Xbox 360. For more information, see the
 [main Xenia wiki](https://github.com/xenia-project/xenia/wiki).
 
-**Interested in supporting the core contributors?** Visit
-[Xenia Project on Patreon](https://www.patreon.com/xenia_project).
-
-Come chat with us about **emulator-related topics** on [Discord](https://discord.gg/Q9mxZf9).
-For developer chat join `#dev` but stay on topic. Lurking is not only fine, but encouraged!
-Please check the [FAQ](https://github.com/xenia-project/xenia/wiki/FAQ) page before asking questions.
-We've got jobs/lives/etc, so don't expect instant answers.
-
-Discussing illegal activities will get you banned.
+For some reason this is the only version that runs edge of time decently on vulkan windows. more needs to be investigated
 
 ## Status
 
