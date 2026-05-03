@@ -586,8 +586,8 @@ static inline void GetScissorTmpl(const RegisterFile& XE_RESTRICT regs,
   uint64_t xyoffsetadd_packed =
       uint64_t(pa_sc_window_offset_window_x_offset) |
       (uint64_t(pa_sc_window_offset_window_y_offset) << 32);
-  __m128i xyoffsetadd = _mm_cvtsi64_si128(
-      static_cast<int64_t>(xyoffsetadd_packed));
+  __m128i xyoffsetadd =
+      _mm_cvtsi64_si128(static_cast<int64_t>(xyoffsetadd_packed));
   xyoffsetadd = _mm_unpacklo_epi64(xyoffsetadd, xyoffsetadd);
   // chrispy: put this here to make it clear that the shift by 31 is extracting
   // this field

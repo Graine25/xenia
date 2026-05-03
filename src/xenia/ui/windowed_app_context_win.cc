@@ -48,9 +48,9 @@ bool Win32WindowedAppContext::Initialize() {
   shcore_module_ = LoadLibraryW(L"SHCore.dll");
   if (shcore_module_) {
     per_monitor_dpi_v1_api_available_ = true;
-    per_monitor_dpi_v1_api_available_ &= LoadLibraryFunction(
-        shcore_module_, "GetDpiForMonitor",
-        per_monitor_dpi_v1_api_.get_dpi_for_monitor);
+    per_monitor_dpi_v1_api_available_ &=
+        LoadLibraryFunction(shcore_module_, "GetDpiForMonitor",
+                            per_monitor_dpi_v1_api_.get_dpi_for_monitor);
   }
   user32_module_ = LoadLibraryW(L"user32.dll");
   if (user32_module_) {
@@ -61,12 +61,12 @@ bool Win32WindowedAppContext::Initialize() {
     per_monitor_dpi_v2_api_available_ &= LoadLibraryFunction(
         user32_module_, "EnableNonClientDpiScaling",
         per_monitor_dpi_v2_api_.enable_non_client_dpi_scaling);
-    per_monitor_dpi_v2_api_available_ &= LoadLibraryFunction(
-        user32_module_, "GetDpiForSystem",
-        per_monitor_dpi_v2_api_.get_dpi_for_system);
-    per_monitor_dpi_v2_api_available_ &= LoadLibraryFunction(
-        user32_module_, "GetDpiForWindow",
-        per_monitor_dpi_v2_api_.get_dpi_for_window);
+    per_monitor_dpi_v2_api_available_ &=
+        LoadLibraryFunction(user32_module_, "GetDpiForSystem",
+                            per_monitor_dpi_v2_api_.get_dpi_for_system);
+    per_monitor_dpi_v2_api_available_ &=
+        LoadLibraryFunction(user32_module_, "GetDpiForWindow",
+                            per_monitor_dpi_v2_api_.get_dpi_for_window);
   }
 
   // Create the message-only window for executing pending functions - using a

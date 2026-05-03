@@ -656,8 +656,7 @@ bool RenderCache::dirty() const {
 
   bool dirty = false;
   dirty |= cur_regs.rb_modecontrol.value != regs[XE_GPU_REG_RB_MODECONTROL];
-  dirty |=
-      cur_regs.rb_surface_info.value != regs[XE_GPU_REG_RB_SURFACE_INFO];
+  dirty |= cur_regs.rb_surface_info.value != regs[XE_GPU_REG_RB_SURFACE_INFO];
   dirty |= cur_regs.rb_color_info.value != regs[XE_GPU_REG_RB_COLOR_INFO];
   dirty |= cur_regs.rb_color1_info.value != regs[XE_GPU_REG_RB_COLOR1_INFO];
   dirty |= cur_regs.rb_color2_info.value != regs[XE_GPU_REG_RB_COLOR2_INFO];

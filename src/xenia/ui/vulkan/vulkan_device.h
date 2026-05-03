@@ -217,7 +217,9 @@ class VulkanDevice {
   const Functions& dfn() const { return functions_; }
   operator VkDevice() const { return device_; }
 
-  uint32_t queue_family_index() const { return queue_family_graphics_compute(); }
+  uint32_t queue_family_index() const {
+    return queue_family_graphics_compute();
+  }
   VkQueue primary_queue() const {
     return queue_families_[queue_family_graphics_compute_].queues[0]->queue;
   }

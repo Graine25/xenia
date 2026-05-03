@@ -53,27 +53,25 @@ inline std::string to_flags_string(VkFormatFeatureFlagBits flags) {
 
 #ifndef VK_SAFE_DESTROY
 #define VK_SAFE_DESTROY(func, device, object, ...) \
-  do {                                            \
-    if (object) {                                 \
-      func(device, object, __VA_ARGS__);          \
-      object = nullptr;                           \
-    }                                             \
+  do {                                             \
+    if (object) {                                  \
+      func(device, object, __VA_ARGS__);           \
+      object = nullptr;                            \
+    }                                              \
   } while (false)
 #endif
 
-#define XE_VK_LEGACY_DEVICE_FUNCTION(name)                              \
-  template <typename... Args>                                           \
-  inline auto name(VkDevice, Args... args) {                            \
-    const auto& legacy_device = xe::ui::vulkan::LegacyVulkanDevice();    \
-    return legacy_device.functions().name(legacy_device.device(),        \
-                                          args...);                      \
+#define XE_VK_LEGACY_DEVICE_FUNCTION(name)                                  \
+  template <typename... Args>                                               \
+  inline auto name(VkDevice, Args... args) {                                \
+    const auto& legacy_device = xe::ui::vulkan::LegacyVulkanDevice();       \
+    return legacy_device.functions().name(legacy_device.device(), args...); \
   }
 
-#define XE_VK_LEGACY_DISPATCH_FUNCTION(name)                         \
-  template <typename... Args>                                        \
-  inline auto name(Args... args) {                                   \
-    return xe::ui::vulkan::LegacyVulkanDevice().functions().name(    \
-        args...);                                                    \
+#define XE_VK_LEGACY_DISPATCH_FUNCTION(name)                               \
+  template <typename... Args>                                              \
+  inline auto name(Args... args) {                                         \
+    return xe::ui::vulkan::LegacyVulkanDevice().functions().name(args...); \
   }
 
 XE_VK_LEGACY_DEVICE_FUNCTION(vkAllocateCommandBuffers)

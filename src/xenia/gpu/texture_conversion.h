@@ -29,8 +29,7 @@ void ConvertTexelCTX1ToR8G8(xenos::Endian endian, void* output,
 void ConvertTexelDXT3AToDXT3(xenos::Endian endian, void* output,
                              const void* input, size_t length);
 
-using UntileCopyBlockCallback =
-    std::function<void(void*, const void*, size_t)>;
+using UntileCopyBlockCallback = std::function<void(void*, const void*, size_t)>;
 
 struct UntileInfo {
   uint32_t offset_x;

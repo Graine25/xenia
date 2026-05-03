@@ -337,8 +337,7 @@ std::pair<VkDeviceSize, VkDeviceSize> BufferCache::UploadConstantRegisters(
   std::memcpy(dest_ptr, &values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031],
               8 * 4);
   dest_ptr += 8 * 4;
-  std::memcpy(dest_ptr, &values[XE_GPU_REG_SHADER_CONSTANT_LOOP_00],
-              32 * 4);
+  std::memcpy(dest_ptr, &values[XE_GPU_REG_SHADER_CONSTANT_LOOP_00], 32 * 4);
   dest_ptr += 32 * 4;
 
   transient_buffer_->Flush(offset, kConstantRegisterUniformRange);

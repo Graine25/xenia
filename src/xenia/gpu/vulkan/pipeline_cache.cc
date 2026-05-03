@@ -39,8 +39,8 @@ PipelineCache::PipelineCache(RegisterFile* register_file,
                              ui::vulkan::VulkanDevice* device)
     : register_file_(register_file), device_(device) {
   SpirvShaderTranslator::Features features(device_);
-  shader_translator_ = std::make_unique<SpirvShaderTranslator>(
-      features, false, false, false);
+  shader_translator_ =
+      std::make_unique<SpirvShaderTranslator>(features, false, false, false);
 }
 
 PipelineCache::~PipelineCache() { Shutdown(); }
@@ -373,9 +373,9 @@ bool PipelineCache::TranslateShader(VulkanShader* shader,
     shader->AnalyzeUcode(ucode_disasm_buffer);
   }
 
-  uint32_t register_count =
-      shader->type() == xenos::ShaderType::kVertex ? cntl.vs_num_reg
-                                                   : cntl.ps_num_reg;
+  uint32_t register_count = shader->type() == xenos::ShaderType::kVertex
+                                ? cntl.vs_num_reg
+                                : cntl.ps_num_reg;
   uint64_t modification =
       shader->type() == xenos::ShaderType::kVertex
           ? shader_translator_->GetDefaultVertexShaderModification(
@@ -383,8 +383,8 @@ bool PipelineCache::TranslateShader(VulkanShader* shader,
           : shader_translator_->GetDefaultPixelShaderModification(
                 shader->GetDynamicAddressableRegisterCount(register_count));
 
-  Shader::Translation& translation = *shader->GetOrCreateTranslation(
-      modification);
+  Shader::Translation& translation =
+      *shader->GetOrCreateTranslation(modification);
   if (!translation.is_translated() &&
       !shader_translator_->TranslateAnalyzedShader(translation)) {
     XELOGE("Shader translation failed; marking shader as ignored");
@@ -1060,11 +1060,9 @@ PipelineCache::UpdateStatus PipelineCache::UpdateShaderStages(
 
   // These are the constant base addresses/ranges for shaders.
   // We have these hardcoded right now cause nothing seems to differ.
-  assert_true(register_file_->values[XE_GPU_REG_SQ_VS_CONST] ==
-                  0x000FF000 ||
+  assert_true(register_file_->values[XE_GPU_REG_SQ_VS_CONST] == 0x000FF000 ||
               register_file_->values[XE_GPU_REG_SQ_VS_CONST] == 0x00000000);
-  assert_true(register_file_->values[XE_GPU_REG_SQ_PS_CONST] ==
-                  0x000FF100 ||
+  assert_true(register_file_->values[XE_GPU_REG_SQ_PS_CONST] == 0x000FF100 ||
               register_file_->values[XE_GPU_REG_SQ_PS_CONST] == 0x00000000);
 
   bool dirty = false;

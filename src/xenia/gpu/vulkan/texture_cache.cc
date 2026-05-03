@@ -271,8 +271,8 @@ TextureCache::Texture* TextureCache::AllocateTexture(
     XELOGE(
         "Texture Cache: vkGetPhysicalDeviceImageFormatProperties failed with "
         "{} for {} ({}) dimension={} image_type={} usage=0x{:X} flags=0x{:X}",
-        ui::vulkan::to_string(image_props_status),
-        texture_info.format_name(), ui::vulkan::to_string(format),
+        ui::vulkan::to_string(image_props_status), texture_info.format_name(),
+        ui::vulkan::to_string(format),
         get_dimension_name(texture_info.dimension),
         static_cast<uint32_t>(image_info.imageType),
         static_cast<uint32_t>(image_info.usage),
@@ -691,12 +691,12 @@ TextureCache::TextureView* TextureCache::DemandView(Texture* texture,
       swizzle_component_map[(swizzle >> 9) & 0x7],
   };
 
-#define SWIZZLE_VECTOR(r, x)                                      \
-  {                                                               \
+#define SWIZZLE_VECTOR(r, x)                                              \
+  {                                                                       \
     const int vector_swizzle = static_cast<int>(config.vector_swizzle.x); \
-    assert_true(vector_swizzle >= 0 &&                            \
-                vector_swizzle < int(xe::countof(components)));   \
-    view_info.components.r = components[vector_swizzle];          \
+    assert_true(vector_swizzle >= 0 &&                                    \
+                vector_swizzle < int(xe::countof(components)));           \
+    view_info.components.r = components[vector_swizzle];                  \
   }
   SWIZZLE_VECTOR(r, x);
   SWIZZLE_VECTOR(g, y);

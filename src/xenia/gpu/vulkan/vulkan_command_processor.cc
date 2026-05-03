@@ -187,7 +187,6 @@ void VulkanCommandProcessor::PrepareForWait() {
   // synchronize here.
   // glFlush();
   // glFinish();
-
 }
 
 void VulkanCommandProcessor::ReturnFromWait() {
@@ -594,8 +593,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
           image_barrier.srcAccessMask =
               vulkan_context.image_ever_written_previously()
-                  ? ui::vulkan::VulkanPresenter::
-                        kGuestOutputInternalAccessMask
+                  ? ui::vulkan::VulkanPresenter::kGuestOutputInternalAccessMask
                   : 0;
           image_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
           image_barrier.oldLayout =
@@ -611,8 +609,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           vkCmdPipelineBarrier(
               command_buffer,
               vulkan_context.image_ever_written_previously()
-                  ? ui::vulkan::VulkanPresenter::
-                        kGuestOutputInternalStageMask
+                  ? ui::vulkan::VulkanPresenter::kGuestOutputInternalStageMask
                   : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
               VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
               &image_barrier);
@@ -669,8 +666,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
             return false;
           }
 
-          status = vkWaitForFences(*device_, 1, &present_fence, VK_TRUE,
-                                   UINT64_MAX);
+          status =
+              vkWaitForFences(*device_, 1, &present_fence, VK_TRUE, UINT64_MAX);
           CheckResult(status, "vkWaitForFences");
           return status == VK_SUCCESS;
         });
@@ -680,8 +677,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   {
 #if FINE_GRAINED_DRAW_SCOPES
     SCOPE_profile_cpu_i(
-        "gpu",
-        "xe::gpu::vulkan::VulkanCommandProcessor::IssueSwap Scavenging");
+        "gpu", "xe::gpu::vulkan::VulkanCommandProcessor::IssueSwap Scavenging");
 #endif  // FINE_GRAINED_DRAW_SCOPES
     // Command buffers must be scavenged first to avoid a race condition.
     // We don't want to reuse a batch when the caches haven't yet cleared old
@@ -814,8 +810,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   if (!index_buffer_info) {
     // Auto-indexed draw.
     uint32_t instance_count = 1;
-    uint32_t first_vertex =
-        register_file_->values[XE_GPU_REG_VGT_INDX_OFFSET];
+    uint32_t first_vertex = register_file_->values[XE_GPU_REG_VGT_INDX_OFFSET];
     uint32_t first_instance = 0;
     vkCmdDraw(command_buffer, index_count, instance_count, first_vertex,
               first_instance);
@@ -823,8 +818,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     // Index buffer draw.
     uint32_t instance_count = 1;
     uint32_t first_index = 0;
-    uint32_t vertex_offset =
-        register_file_->values[XE_GPU_REG_VGT_INDX_OFFSET];
+    uint32_t vertex_offset = register_file_->values[XE_GPU_REG_VGT_INDX_OFFSET];
     uint32_t first_instance = 0;
     vkCmdDrawIndexed(command_buffer, index_count, instance_count, first_index,
                      vertex_offset, first_instance);
@@ -995,8 +989,8 @@ bool VulkanCommandProcessor::IssueCopy() {
     uint32_t copy_ref;
     uint32_t copy_mask;
     uint32_t copy_surface_slice;
-  }* copy_regs = reinterpret_cast<decltype(copy_regs)>(
-      &regs[XE_GPU_REG_RB_COPY_CONTROL]);
+  }* copy_regs =
+      reinterpret_cast<decltype(copy_regs)>(&regs[XE_GPU_REG_RB_COPY_CONTROL]);
 
   struct {
     reg::PA_SC_WINDOW_OFFSET window_offset;
@@ -1084,8 +1078,8 @@ bool VulkanCommandProcessor::IssueCopy() {
   trace_writer_.WriteMemoryRead(fetch->address << 2, fetch->size * 4);
 
   // Most vertices have a negative half pixel offset applied, which we reverse.
-  auto& vtx_cntl = *reinterpret_cast<reg::PA_SU_VTX_CNTL*>(
-      &regs[XE_GPU_REG_PA_SU_VTX_CNTL]);
+  auto& vtx_cntl =
+      *reinterpret_cast<reg::PA_SU_VTX_CNTL*>(&regs[XE_GPU_REG_PA_SU_VTX_CNTL]);
   float vtx_offset =
       vtx_cntl.pix_center == xenos::PixelCenter::kD3DZero ? 0.5f : 0.f;
 

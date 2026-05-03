@@ -674,16 +674,16 @@ def get_clang_format_binary():
     Returns:
       A path to the clang-format executable.
     """
-    clang_format_version_min = 19
+    clang_format_version_required = 20
 
     # Build list of all potential clang-format binaries
     all_binaries = []
 
-    # Check versioned binaries from 21 down to min, preferring newer
-    for version in range(21, clang_format_version_min - 1, -1):
-        binary = f"clang-format-{version}"
-        if has_bin(binary):
-            all_binaries.append(binary)
+    # Match the GitHub Actions lint workflow exactly. Newer clang-format
+    # versions can produce different wrapping decisions and fail CI.
+    binary = f"clang-format-{clang_format_version_required}"
+    if has_bin(binary):
+        all_binaries.append(binary)
 
     # Also check generic clang-format
     all_binaries.append("clang-format")
@@ -698,19 +698,18 @@ def get_clang_format_binary():
 
         all_binaries.append(os.path.join(os.environ["ProgramFiles"], "LLVM", "bin", "clang-format.exe"))
 
-    # Find the highest version available
+    # Find the required version.
     best_binary = None
-    best_version = 0
 
     for binary in all_binaries:
         if has_bin(binary):
             try:
                 clang_format_out = subprocess.check_output([binary, "--version"], text=True)
                 version = int(clang_format_out.split("version ")[1].split(".")[0])
-                if version >= clang_format_version_min and version > best_version:
-                    best_version = version
+                if version == clang_format_version_required:
                     best_binary = binary
                     best_output = clang_format_out
+                    break
             except:
                 continue
 
@@ -718,7 +717,7 @@ def get_clang_format_binary():
         print(best_output)
         return best_binary
 
-    print_error(f"clang-format {clang_format_version_min} or newer is not on PATH")
+    print_error(f"clang-format {clang_format_version_required} is not on PATH")
     sys.exit(1)
 
 

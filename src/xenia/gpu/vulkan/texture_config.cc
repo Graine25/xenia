@@ -13,16 +13,12 @@ namespace xe {
 namespace gpu {
 namespace vulkan {
 
-#define COMP_SWIZ(r, g, b, a)                              \
-  {                                                        \
-    VK_COMPONENT_SWIZZLE_##r, VK_COMPONENT_SWIZZLE_##g,    \
-        VK_COMPONENT_SWIZZLE_##b, VK_COMPONENT_SWIZZLE_##a \
-  }
-#define VEC_SWIZ(x, y, z, w)                                    \
-  {                                                             \
-    VECTOR_SWIZZLE_##x, VECTOR_SWIZZLE_##y, VECTOR_SWIZZLE_##z, \
-        VECTOR_SWIZZLE_##w                                      \
-  }
+#define COMP_SWIZ(r, g, b, a)                          \
+  {VK_COMPONENT_SWIZZLE_##r, VK_COMPONENT_SWIZZLE_##g, \
+   VK_COMPONENT_SWIZZLE_##b, VK_COMPONENT_SWIZZLE_##a}
+#define VEC_SWIZ(x, y, z, w)                                   \
+  {VECTOR_SWIZZLE_##x, VECTOR_SWIZZLE_##y, VECTOR_SWIZZLE_##z, \
+   VECTOR_SWIZZLE_##w}
 
 #define RGBA COMP_SWIZ(R, G, B, A)
 #define ___R COMP_SWIZ(IDENTITY, IDENTITY, IDENTITY, R)
@@ -32,14 +28,12 @@ namespace vulkan {
 #define YXWZ VEC_SWIZ(Y, X, W, Z)
 #define ZYXW VEC_SWIZ(Z, Y, X, W)
 
-#define ___(format) \
-  { VK_FORMAT_##format }
+#define ___(format) {VK_FORMAT_##format}
 #define _c_(format, component_swizzle) \
-  { VK_FORMAT_##format, component_swizzle, XYZW }
-#define __v(format, vector_swizzle) \
-  { VK_FORMAT_##format, RGBA, vector_swizzle }
+  {VK_FORMAT_##format, component_swizzle, XYZW}
+#define __v(format, vector_swizzle) {VK_FORMAT_##format, RGBA, vector_swizzle}
 #define _cv(format, component_swizzle, vector_swizzle) \
-  { VK_FORMAT_##format, component_swizzle, vector_swizzle }
+  {VK_FORMAT_##format, component_swizzle, vector_swizzle}
 
 // https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/VkFormat.html
 const TextureConfig texture_configs[64] = {

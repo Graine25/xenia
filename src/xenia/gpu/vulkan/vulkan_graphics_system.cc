@@ -20,9 +20,7 @@ namespace vulkan {
 VulkanGraphicsSystem::VulkanGraphicsSystem() = default;
 VulkanGraphicsSystem::~VulkanGraphicsSystem() = default;
 
-std::string VulkanGraphicsSystem::name() const {
-  return "Vulkan - obsolete";
-}
+std::string VulkanGraphicsSystem::name() const { return "Vulkan - obsolete"; }
 
 X_STATUS VulkanGraphicsSystem::Setup(cpu::Processor* processor,
                                      kernel::KernelState* kernel_state,

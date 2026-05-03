@@ -92,9 +92,8 @@ static uint32_t TiledOffset2DColumn(uint32_t x, uint32_t y, uint32_t log2_bpp,
   uint32_t micro = (x & 7) << log2_bpp;
   uint32_t offset =
       base_offset + (macro + ((micro & ~0xF) << 1) + (micro & 0xF));
-  return ((offset & ~0x1FF) << 3) + ((offset & 0x1C0) << 2) +
-         (offset & 0x3F) + ((y & 16) << 7) +
-         (((((y & 8) >> 2) + (x >> 3)) & 3) << 6);
+  return ((offset & ~0x1FF) << 3) + ((offset & 0x1C0) << 2) + (offset & 0x3F) +
+         ((y & 16) << 7) + (((((y & 8) >> 2) + (x >> 3)) & 3) << 6);
 }
 
 void Untile(uint8_t* output_buffer, const uint8_t* input_buffer,
@@ -110,9 +109,9 @@ void Untile(uint8_t* output_buffer, const uint8_t* input_buffer,
       untile_info->output_format_info->bytes_per_block();
   uint32_t output_pitch = untile_info->output_pitch * output_bytes_per_block;
 
-  uint32_t log2_bpp = (input_bytes_per_block / 4) +
-                      ((input_bytes_per_block / 2) >>
-                       (input_bytes_per_block / 4));
+  uint32_t log2_bpp =
+      (input_bytes_per_block / 4) +
+      ((input_bytes_per_block / 2) >> (input_bytes_per_block / 4));
 
   uint32_t output_row_offset = 0;
   for (uint32_t y = 0; y < untile_info->height; y++) {
@@ -121,9 +120,9 @@ void Untile(uint8_t* output_buffer, const uint8_t* input_buffer,
 
     uint32_t output_offset = output_row_offset;
     for (uint32_t x = 0; x < untile_info->width; x++) {
-      uint32_t input_offset = TiledOffset2DColumn(
-          untile_info->offset_x + x, untile_info->offset_y + y, log2_bpp,
-          input_row_offset);
+      uint32_t input_offset = TiledOffset2DColumn(untile_info->offset_x + x,
+                                                  untile_info->offset_y + y,
+                                                  log2_bpp, input_row_offset);
       input_offset >>= log2_bpp;
 
       untile_info->copy_callback(

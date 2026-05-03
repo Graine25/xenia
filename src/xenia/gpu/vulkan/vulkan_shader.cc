@@ -55,9 +55,9 @@ bool VulkanShader::Prepare(const Shader::Translation& translation) {
       vkCreateShaderModule(*device_, &shader_info, nullptr, &shader_module_);
   CheckResult(status, "vkCreateShaderModule");
 
-  char typeChar = shader_type_ == xenos::ShaderType::kPixel
-                      ? 'p'
-                      : shader_type_ == xenos::ShaderType::kVertex ? 'v' : 'u';
+  char typeChar = shader_type_ == xenos::ShaderType::kPixel    ? 'p'
+                  : shader_type_ == xenos::ShaderType::kVertex ? 'v'
+                                                               : 'u';
   device_->DbgSetObjectName(
       uint64_t(shader_module_), VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT,
       fmt::format("S({}): {:016X}", typeChar, ucode_data_hash()));

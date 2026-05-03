@@ -54,7 +54,8 @@ VkDeviceMemory VulkanDevice::AllocateMemory(
   uint32_t candidate_memory_types =
       requirements.memoryTypeBits & memory_types_.device_local;
   if (required_properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
-    candidate_memory_types = requirements.memoryTypeBits & memory_types_.host_visible;
+    candidate_memory_types =
+        requirements.memoryTypeBits & memory_types_.host_visible;
   }
   if (required_properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) {
     candidate_memory_types &= memory_types_.host_coherent;
