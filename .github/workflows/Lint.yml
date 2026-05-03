@@ -25,6 +25,7 @@ jobs:
           sudo apt-add-repository "deb http://apt.llvm.org/${UBUNTU_BASE}/ llvm-toolchain-${UBUNTU_BASE}-$LLVM_VERSION main"
           sudo apt-get -y update
           sudo apt-get -y install clang-format-$LLVM_VERSION
+          sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-$LLVM_VERSION 200
       - name: Lint
-        run: ./xenia-build.py lint --all
+        run: python3 ./xenia-build lint --all
 
