@@ -10,6 +10,7 @@
 #include "xenia/gpu/vulkan/render_cache.h"
 
 #include <algorithm>
+#include <cstring>
 
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
@@ -382,6 +383,10 @@ bool CachedFramebuffer::IsCompatible(
   }
   // TODO(benvanik): separate image views from images in tiles and store in fb?
   for (int i = 0; i < 4; ++i) {
+    if (desired_config.color[i].used != (color_attachments[i] != nullptr)) {
+      return false;
+    }
+
     // Ensure the the attachment points to the same tile.
     if (!color_attachments[i]) {
       continue;
@@ -395,6 +400,10 @@ bool CachedFramebuffer::IsCompatible(
     }
   }
   // Ensure depth attachment is correct.
+  if (desired_config.depth_stencil.used !=
+      (depth_stencil_attachment != nullptr)) {
+    return false;
+  }
   if (depth_stencil_attachment &&
       (depth_stencil_attachment->key.tile_offset !=
            desired_config.depth_stencil.edram_base ||
@@ -441,55 +450,58 @@ VkResult CachedRenderPass::Initialize() {
     sample_count = VK_SAMPLE_COUNT_1_BIT;
   }
 
-  // Initialize all attachments to default unused.
-  // As we set layout(location=RT) in shaders we must always provide 4.
   VkAttachmentDescription attachments[5];
-  for (int i = 0; i < 4; ++i) {
-    attachments[i].flags = VK_ATTACHMENT_DESCRIPTION_MAY_ALIAS_BIT;
-    attachments[i].format = VK_FORMAT_UNDEFINED;
-    attachments[i].samples = sample_count;
-    attachments[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    attachments[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    attachments[i].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    attachments[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
-    attachments[i].initialLayout = VK_IMAGE_LAYOUT_GENERAL;
-    attachments[i].finalLayout = VK_IMAGE_LAYOUT_GENERAL;
-  }
-  auto& depth_stencil_attachment = attachments[4];
-  depth_stencil_attachment.flags = 0;
-  depth_stencil_attachment.format = VK_FORMAT_UNDEFINED;
-  depth_stencil_attachment.samples = sample_count;
-  depth_stencil_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-  depth_stencil_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-  depth_stencil_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-  depth_stencil_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
-  depth_stencil_attachment.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
-  depth_stencil_attachment.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+  uint32_t attachment_count = 0;
 
-  // Configure attachments based on what's enabled.
+  // Configure attachments based on what's enabled. The shader interface still
+  // has 4 color output locations, but inactive ones must be marked unused so
+  // the same tile view is not bound multiple times in a subpass.
   VkAttachmentReference color_attachment_refs[4];
   for (int i = 0; i < 4; ++i) {
     auto& color_config = config.color[i];
-    // TODO(benvanik): see how loose we can be with these.
-    attachments[i].format =
-        ColorRenderTargetFormatToVkFormat(color_config.format);
     auto& color_attachment_ref = color_attachment_refs[i];
-    color_attachment_ref.attachment = i;
     color_attachment_ref.layout = VK_IMAGE_LAYOUT_GENERAL;
+    if (!color_config.used) {
+      color_attachment_ref.attachment = VK_ATTACHMENT_UNUSED;
+      continue;
+    }
+
+    color_attachment_ref.attachment = attachment_count;
+    auto& color_attachment = attachments[attachment_count++];
+    color_attachment.flags = 0;
+    color_attachment.format =
+        ColorRenderTargetFormatToVkFormat(color_config.format);
+    color_attachment.samples = sample_count;
+    color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    color_attachment.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
+    color_attachment.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
   }
 
   // Configure depth.
   VkAttachmentReference depth_stencil_attachment_ref;
   depth_stencil_attachment_ref.layout = VK_IMAGE_LAYOUT_GENERAL;
-
   auto& depth_config = config.depth_stencil;
-  depth_stencil_attachment_ref.attachment = 4;
-  depth_stencil_attachment.format =
-      DepthRenderTargetFormatToVkFormat(depth_config.format);
+  VkAttachmentReference* depth_stencil_attachment_ref_ptr = nullptr;
+  if (depth_config.used) {
+    depth_stencil_attachment_ref.attachment = attachment_count;
+    auto& depth_stencil_attachment = attachments[attachment_count++];
+    depth_stencil_attachment.flags = 0;
+    depth_stencil_attachment.format =
+        DepthRenderTargetFormatToVkFormat(depth_config.format);
+    depth_stencil_attachment.samples = sample_count;
+    depth_stencil_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    depth_stencil_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depth_stencil_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    depth_stencil_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depth_stencil_attachment.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
+    depth_stencil_attachment.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+    depth_stencil_attachment_ref_ptr = &depth_stencil_attachment_ref;
+  }
 
   // Single subpass that writes to our attachments.
-  // FIXME: "Multiple attachments that alias the same memory must not be used in
-  // a single subpass"
   // TODO: Input attachment for depth/stencil reads?
   VkSubpassDescription subpass_info;
   subpass_info.flags = 0;
@@ -499,7 +511,7 @@ VkResult CachedRenderPass::Initialize() {
   subpass_info.colorAttachmentCount = 4;
   subpass_info.pColorAttachments = color_attachment_refs;
   subpass_info.pResolveAttachments = nullptr;
-  subpass_info.pDepthStencilAttachment = &depth_stencil_attachment_ref;
+  subpass_info.pDepthStencilAttachment = depth_stencil_attachment_ref_ptr;
   subpass_info.preserveAttachmentCount = 0;
   subpass_info.pPreserveAttachments = nullptr;
 
@@ -509,7 +521,7 @@ VkResult CachedRenderPass::Initialize() {
   render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
   render_pass_info.pNext = nullptr;
   render_pass_info.flags = 0;
-  render_pass_info.attachmentCount = 5;
+  render_pass_info.attachmentCount = attachment_count;
   render_pass_info.pAttachments = attachments;
   render_pass_info.subpassCount = 1;
   render_pass_info.pSubpasses = &subpass_info;
@@ -540,11 +552,19 @@ bool CachedRenderPass::IsCompatible(
 
   for (int i = 0; i < 4; ++i) {
     // TODO(benvanik): allow compatible vulkan formats.
-    if (config.color[i].format != desired_config.color[i].format) {
+    if (config.color[i].used != desired_config.color[i].used) {
+      return false;
+    }
+    if (config.color[i].used &&
+        config.color[i].format != desired_config.color[i].format) {
       return false;
     }
   }
-  if (config.depth_stencil.format != desired_config.depth_stencil.format) {
+  if (config.depth_stencil.used != desired_config.depth_stencil.used) {
+    return false;
+  }
+  if (config.depth_stencil.used &&
+      config.depth_stencil.format != desired_config.depth_stencil.format) {
     return false;
   }
   return true;
@@ -653,6 +673,7 @@ bool RenderCache::dirty() const {
   dirty |= cur_regs.rb_color1_info.value != regs[XE_GPU_REG_RB_COLOR1_INFO].u32;
   dirty |= cur_regs.rb_color2_info.value != regs[XE_GPU_REG_RB_COLOR2_INFO].u32;
   dirty |= cur_regs.rb_color3_info.value != regs[XE_GPU_REG_RB_COLOR3_INFO].u32;
+  dirty |= cur_regs.rb_color_mask != regs[XE_GPU_REG_RB_COLOR_MASK].u32;
   dirty |= cur_regs.rb_depth_info.value != regs[XE_GPU_REG_RB_DEPTH_INFO].u32;
   dirty |= cur_regs.pa_sc_window_scissor_tl !=
            regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL].u32;
@@ -689,12 +710,26 @@ const RenderState* RenderCache::BeginRenderPass(VkCommandBuffer command_buffer,
       SetShadowRegister(&regs.rb_color2_info.value, XE_GPU_REG_RB_COLOR2_INFO);
   dirty |=
       SetShadowRegister(&regs.rb_color3_info.value, XE_GPU_REG_RB_COLOR3_INFO);
+  dirty |= SetShadowRegister(&regs.rb_color_mask, XE_GPU_REG_RB_COLOR_MASK);
   dirty |=
       SetShadowRegister(&regs.rb_depth_info.value, XE_GPU_REG_RB_DEPTH_INFO);
   dirty |= SetShadowRegister(&regs.pa_sc_window_scissor_tl,
                              XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL);
   dirty |= SetShadowRegister(&regs.pa_sc_window_scissor_br,
                              XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR);
+  uint32_t pixel_shader_color_targets = 0xF;
+  if (pixel_shader) {
+    pixel_shader_color_targets = 0;
+    for (uint32_t i = 0; i < 4; ++i) {
+      if (pixel_shader->writes_color_target(i)) {
+        pixel_shader_color_targets |= 1u << i;
+      }
+    }
+  }
+  if (regs.pixel_shader_color_targets != pixel_shader_color_targets) {
+    regs.pixel_shader_color_targets = pixel_shader_color_targets;
+    dirty = true;
+  }
   if (!dirty && current_state_.render_pass) {
     // No registers have changed so we can reuse the previous render pass -
     // just begin with what we had.
@@ -779,6 +814,8 @@ const RenderState* RenderCache::BeginRenderPass(VkCommandBuffer command_buffer,
 }
 
 bool RenderCache::ParseConfiguration(RenderConfiguration* config) {
+  std::memset(config, 0, sizeof(*config));
+
   auto& regs = shadow_registers_;
 
   // RB_MODECONTROL
@@ -816,6 +853,23 @@ bool RenderCache::ParseConfiguration(RenderConfiguration* config) {
     for (int i = 0; i < 4; ++i) {
       config->color[i].edram_base = color_info[i].color_base;
       config->color[i].format = GetBaseRTFormat(color_info[i].color_format);
+      uint32_t color_write_mask = (regs.rb_color_mask >> (i * 4)) & 0xF;
+      config->color[i].used =
+          color_write_mask && (regs.pixel_shader_color_targets & (1u << i));
+    }
+
+    for (int i = 0; i < 4; ++i) {
+      if (!config->color[i].used) {
+        continue;
+      }
+      for (int j = 0; j < i; ++j) {
+        if (config->color[j].used &&
+            config->color[j].edram_base == config->color[i].edram_base &&
+            config->color[j].format == config->color[i].format) {
+          config->color[i].used = false;
+          break;
+        }
+      }
     }
   } else {
     for (int i = 0; i < 4; ++i) {
@@ -830,6 +884,7 @@ bool RenderCache::ParseConfiguration(RenderConfiguration* config) {
       config->mode_control == ModeControl::kDepth) {
     config->depth_stencil.edram_base = regs.rb_depth_info.depth_base;
     config->depth_stencil.format = regs.rb_depth_info.depth_format;
+    config->depth_stencil.used = true;
   } else {
     config->depth_stencil.edram_base = 0;
     config->depth_stencil.format = DepthRenderTargetFormat::kD24S8;
@@ -890,6 +945,10 @@ bool RenderCache::ConfigureRenderPass(VkCommandBuffer command_buffer,
     CachedTileView* target_color_attachments[4] = {nullptr, nullptr, nullptr,
                                                    nullptr};
     for (int i = 0; i < 4; ++i) {
+      if (!config->color[i].used) {
+        continue;
+      }
+
       TileViewKey color_key;
       color_key.tile_offset = config->color[i].edram_base;
       color_key.tile_width =
@@ -909,23 +968,26 @@ bool RenderCache::ConfigureRenderPass(VkCommandBuffer command_buffer,
       }
     }
 
-    TileViewKey depth_stencil_key;
-    depth_stencil_key.tile_offset = config->depth_stencil.edram_base;
-    depth_stencil_key.tile_width =
-        xe::round_up(config->surface_pitch_px, tile_width) / tile_width;
-    // depth_stencil_key.tile_height =
-    //     xe::round_up(config->surface_height_px, tile_height) / tile_height;
-    depth_stencil_key.tile_height = 160;
-    depth_stencil_key.color_or_depth = 0;
-    depth_stencil_key.msaa_samples =
-        0;  // static_cast<uint16_t>(config->surface_msaa);
-    depth_stencil_key.edram_format =
-        static_cast<uint16_t>(config->depth_stencil.format);
-    auto target_depth_stencil_attachment =
-        FindOrCreateTileView(command_buffer, depth_stencil_key);
-    if (!target_depth_stencil_attachment) {
-      XELOGE("Failed to get tile view for depth/stencil attachment");
-      return false;
+    CachedTileView* target_depth_stencil_attachment = nullptr;
+    if (config->depth_stencil.used) {
+      TileViewKey depth_stencil_key;
+      depth_stencil_key.tile_offset = config->depth_stencil.edram_base;
+      depth_stencil_key.tile_width =
+          xe::round_up(config->surface_pitch_px, tile_width) / tile_width;
+      // depth_stencil_key.tile_height =
+      //     xe::round_up(config->surface_height_px, tile_height) / tile_height;
+      depth_stencil_key.tile_height = 160;
+      depth_stencil_key.color_or_depth = 0;
+      depth_stencil_key.msaa_samples =
+          0;  // static_cast<uint16_t>(config->surface_msaa);
+      depth_stencil_key.edram_format =
+          static_cast<uint16_t>(config->depth_stencil.format);
+      target_depth_stencil_attachment =
+          FindOrCreateTileView(command_buffer, depth_stencil_key);
+      if (!target_depth_stencil_attachment) {
+        XELOGE("Failed to get tile view for depth/stencil attachment");
+        return false;
+      }
     }
 
     uint32_t surface_pitch_px = config->surface_msaa != MsaaSamples::k4X
