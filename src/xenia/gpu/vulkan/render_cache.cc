@@ -1042,6 +1042,22 @@ CachedTileView* RenderCache::FindTileView(uint32_t base, uint32_t pitch,
     return view;
   }
 
+  if (color_or_depth) {
+    for (auto it = cached_tile_views_.rbegin(); it != cached_tile_views_.rend();
+         ++it) {
+      auto tile_view = *it;
+      if (!tile_view->key.color_or_depth) {
+        continue;
+      }
+      if (tile_view->key.tile_offset == key.tile_offset &&
+          tile_view->key.tile_width == key.tile_width &&
+          tile_view->key.tile_height == key.tile_height &&
+          tile_view->key.msaa_samples == key.msaa_samples) {
+        return tile_view;
+      }
+    }
+  }
+
   return nullptr;
 }
 
