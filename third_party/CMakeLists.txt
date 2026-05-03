@@ -195,6 +195,29 @@ target_include_directories(pugixml PUBLIC pugixml/src)
 # ==============================================================================
 # snappy
 # ==============================================================================
+set(_third_party_configure_args)
+if(CMAKE_GENERATOR)
+  list(APPEND _third_party_configure_args -G "${CMAKE_GENERATOR}")
+endif()
+if(CMAKE_GENERATOR_PLATFORM)
+  list(APPEND _third_party_configure_args -A "${CMAKE_GENERATOR_PLATFORM}")
+endif()
+if(CMAKE_GENERATOR_TOOLSET)
+  list(APPEND _third_party_configure_args -T "${CMAKE_GENERATOR_TOOLSET}")
+endif()
+if(CMAKE_C_COMPILER)
+  list(APPEND _third_party_configure_args
+    "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")
+endif()
+if(CMAKE_CXX_COMPILER)
+  list(APPEND _third_party_configure_args
+    "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}")
+endif()
+if(CMAKE_RC_COMPILER)
+  list(APPEND _third_party_configure_args
+    "-DCMAKE_RC_COMPILER=${CMAKE_RC_COMPILER}")
+endif()
+
 # Generate snappy-stubs-public.h if missing
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/snappy/snappy-stubs-public.h")
   if(XE_TARGET_X86_64)
@@ -204,13 +227,18 @@ if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/snappy/snappy-stubs-public.h")
   endif()
   execute_process(
     COMMAND ${CMAKE_COMMAND}
+      ${_third_party_configure_args}
       -DSNAPPY_BUILD_TESTS=OFF
       -DSNAPPY_BUILD_BENCHMARKS=OFF
       ${_snappy_avx_flag}
       ${CMAKE_CURRENT_SOURCE_DIR}/snappy
       -B${CMAKE_CURRENT_SOURCE_DIR}/snappy
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    RESULT_VARIABLE _snappy_configure_result
   )
+  if(_snappy_configure_result)
+    message(FATAL_ERROR "Failed to configure third_party/snappy")
+  endif()
 endif()
 add_library(snappy STATIC
   snappy/snappy-internal.h
@@ -286,12 +314,17 @@ endforeach()
 if(_zlibng_needs_configure)
   execute_process(
     COMMAND ${CMAKE_COMMAND}
+      ${_third_party_configure_args}
       -DZLIB_ENABLE_TESTS=OFF
       -DWITH_GTEST=OFF
       ${CMAKE_CURRENT_SOURCE_DIR}/zlib-ng
       -B${CMAKE_CURRENT_SOURCE_DIR}/zlib-ng
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    RESULT_VARIABLE _zlibng_configure_result
   )
+  if(_zlibng_configure_result)
+    message(FATAL_ERROR "Failed to configure third_party/zlib-ng")
+  endif()
 endif()
 file(GLOB _zlibng_c "zlib-ng/*.c")
 file(GLOB _zlibng_generic "zlib-ng/arch/generic/*.c")
@@ -332,27 +365,44 @@ else()
     X86_AVX512VNNI
     WITH_GZFILEOP
   )
-  if(NOT MSVC)
+  if(CMAKE_C_COMPILER_ID MATCHES "Clang" AND
+     CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    target_compile_definitions(zlib-ng PRIVATE HAVE_BUILTIN_CTZ HAVE_BUILTIN_CTZLL)
+    set(_zlibng_avx2_options /clang:-mavx2 /clang:-mbmi2)
+    set(_zlibng_avx512_options
+      /clang:-mavx512f /clang:-mavx512dq /clang:-mavx512vl
+      /clang:-mavx512bw /clang:-mbmi2)
+    set(_zlibng_avx512_vnni_options
+      /clang:-mavx512f /clang:-mavx512dq /clang:-mavx512vl
+      /clang:-mavx512bw /clang:-mavx512vnni /clang:-mbmi2)
+  elseif(NOT MSVC)
     # GCC/Clang have native __builtin_ctz/__builtin_ctzll (MSVC gets these
     # from fallback_builtins.h). Defining these enables optimized compare256
     # and longest_match codepaths.
     target_compile_definitions(zlib-ng PRIVATE HAVE_BUILTIN_CTZ HAVE_BUILTIN_CTZLL)
-    # GCC/Clang need per-file ISA flags; MSVC handles this via runtime dispatch
+    set(_zlibng_avx2_options -mavx2 -mbmi2)
+    set(_zlibng_avx512_options
+      -mavx512f -mavx512dq -mavx512vl -mavx512bw -mbmi2)
+    set(_zlibng_avx512_vnni_options
+      -mavx512f -mavx512dq -mavx512vl -mavx512bw -mavx512vnni -mbmi2)
+  endif()
+  if(DEFINED _zlibng_avx2_options)
+    # Clang needs per-file ISA flags for these runtime-dispatched code paths.
     set_source_files_properties(
       zlib-ng/arch/x86/adler32_avx2.c
       zlib-ng/arch/x86/chunkset_avx2.c
       zlib-ng/arch/x86/compare256_avx2.c
       zlib-ng/arch/x86/slide_hash_avx2.c
-      PROPERTIES COMPILE_OPTIONS "-mavx2;-mbmi2"
+      PROPERTIES COMPILE_OPTIONS "${_zlibng_avx2_options}"
     )
     set_source_files_properties(
       zlib-ng/arch/x86/adler32_avx512.c
       zlib-ng/arch/x86/chunkset_avx512.c
-      PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mavx512vl;-mavx512bw;-mbmi2"
+      PROPERTIES COMPILE_OPTIONS "${_zlibng_avx512_options}"
     )
     set_source_files_properties(
       zlib-ng/arch/x86/adler32_avx512_vnni.c
-      PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mavx512vl;-mavx512bw;-mavx512vnni;-mbmi2"
+      PROPERTIES COMPILE_OPTIONS "${_zlibng_avx512_vnni_options}"
     )
   endif()
 endif()
@@ -546,9 +596,15 @@ function(ffmpeg_common target)
     )
     target_link_libraries(${target} PRIVATE bcrypt)
     # Size optimization on Debug/Checked (dead code elimination is mandatory)
+    set(_ffmpeg_size_opt_flag -Os)
+    if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+      set(_ffmpeg_size_opt_flag /Os)
+    elseif(CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+      set(_ffmpeg_size_opt_flag /Os)
+    endif()
     target_compile_options(${target} PRIVATE
-      $<$<CONFIG:Debug>:/Os>
-      $<$<CONFIG:Checked>:/Os>
+      $<$<CONFIG:Debug>:${_ffmpeg_size_opt_flag}>
+      $<$<CONFIG:Checked>:${_ffmpeg_size_opt_flag}>
     )
   else()
     target_include_directories(${target} PRIVATE

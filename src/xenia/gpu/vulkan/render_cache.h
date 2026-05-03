@@ -95,7 +95,7 @@ class CachedTileView {
 // Parsed render configuration from the current render state.
 struct RenderConfiguration {
   // Render mode (color+depth, depth-only, etc).
-  xenos::ModeControl mode_control;
+  xenos::EdramMode mode_control;
   // Target surface pitch multiplied by MSAA, in pixels.
   uint32_t surface_pitch_px;
   // ESTIMATED target surface height multiplied by MSAA, in pixels.

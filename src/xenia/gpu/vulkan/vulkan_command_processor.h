@@ -33,8 +33,8 @@
 #include "xenia/memory.h"
 #include "xenia/ui/vulkan/blitter.h"
 #include "xenia/ui/vulkan/fenced_pools.h"
-#include "xenia/ui/vulkan/vulkan_context.h"
 #include "xenia/ui/vulkan/vulkan_device.h"
+#include "xenia/ui/vulkan/vulkan_presenter.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
 
 namespace xe {
@@ -73,8 +73,8 @@ class VulkanCommandProcessor : public CommandProcessor {
   void CreateSwapImage(VkCommandBuffer setup_buffer, VkExtent2D extents);
   void DestroySwapImage();
 
-  void PerformSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
-                   uint32_t frontbuffer_height) override;
+  void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                 uint32_t frontbuffer_height) override;
 
   Shader* LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
                      const uint32_t* host_address,
@@ -98,7 +98,7 @@ class VulkanCommandProcessor : public CommandProcessor {
   bool IssueCopy() override;
 
   void InitializeTrace() override;
-  void FinalizeTrace() override;
+  void FinalizeTrace();
 
   xe::ui::vulkan::VulkanDevice* device_ = nullptr;
 
@@ -110,7 +110,6 @@ class VulkanCommandProcessor : public CommandProcessor {
   uint64_t dirty_float_constants_ = 0;  // Dirty float constants in blocks of 4
   uint8_t dirty_bool_constants_ = 0;
   uint32_t dirty_loop_constants_ = 0;
-  uint8_t dirty_gamma_constants_ = 0;
 
   uint32_t coher_base_vc_ = 0;
   uint32_t coher_size_vc_ = 0;
@@ -121,7 +120,7 @@ class VulkanCommandProcessor : public CommandProcessor {
   // was not available this will be the device primary_queue and the
   // queue_mutex must be used to synchronize access to it.
   VkQueue queue_ = nullptr;
-  std::mutex* queue_mutex_ = nullptr;
+  std::recursive_mutex* queue_mutex_ = nullptr;
 
   // Last copy base address, for debugging only.
   uint32_t last_copy_base_ = 0;
@@ -137,6 +136,8 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   std::unique_ptr<ui::vulkan::Blitter> blitter_;
   std::unique_ptr<ui::vulkan::CommandBufferPool> command_buffer_pool_;
+
+  SwapState swap_state_;
 
   bool frame_open_ = false;
   const RenderState* current_render_state_ = nullptr;

@@ -21,6 +21,7 @@
 #include "xenia/gpu/vulkan/vulkan_gpu_flags.h"
 #include "xenia/gpu/vulkan/vulkan_graphics_system.h"
 #include "xenia/gpu/xenos.h"
+#include "xenia/ui/vulkan/vulkan_provider.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
 
 namespace xe {
@@ -65,9 +66,11 @@ bool VulkanCommandProcessor::SetupContext() {
     return false;
   }
 
-  // Acquire our device and queue.
-  auto context = static_cast<xe::ui::vulkan::VulkanContext*>(context_.get());
-  device_ = context->device();
+  // Acquire our device and queue from Canary's current provider model.
+  auto provider = static_cast<xe::ui::vulkan::VulkanProvider*>(
+      graphics_system_->provider());
+  device_ = provider->vulkan_device();
+  xe::ui::vulkan::RegisterLegacyVulkanDevice(device_);
   queue_ = device_->AcquireQueue(device_->queue_family_index());
   if (!queue_) {
     // Need to reuse primary queue (with locks).
@@ -149,18 +152,16 @@ void VulkanCommandProcessor::ShutdownContext() {
   // Free all pools. This must come after all of our caches clean up.
   command_buffer_pool_.reset();
 
-  // Release queue, if we were using an acquired one.
-  if (!queue_mutex_) {
-    device_->ReleaseQueue(queue_, device_->queue_family_index());
-    queue_ = nullptr;
-  }
+  device_->ReleaseQueue(queue_, device_->queue_family_index());
+  queue_ = nullptr;
+  queue_mutex_ = nullptr;
 
   CommandProcessor::ShutdownContext();
 }
 
 void VulkanCommandProcessor::MakeCoherent() {
   RegisterFile* regs = register_file_;
-  auto status_host = regs->values[XE_GPU_REG_COHER_STATUS_HOST].u32;
+  auto status_host = regs->values[XE_GPU_REG_COHER_STATUS_HOST];
 
   CommandProcessor::MakeCoherent();
 
@@ -170,8 +171,8 @@ void VulkanCommandProcessor::MakeCoherent() {
     buffer_cache_->InvalidateCache();
 
     if ((status_host & 0x01000000) != 0 && (status_host & 0x02000000) == 0) {
-      coher_base_vc_ = regs->values[XE_GPU_REG_COHER_BASE_HOST].u32;
-      coher_size_vc_ = regs->values[XE_GPU_REG_COHER_SIZE_HOST].u32;
+      coher_base_vc_ = regs->values[XE_GPU_REG_COHER_BASE_HOST];
+      coher_size_vc_ = regs->values[XE_GPU_REG_COHER_SIZE_HOST];
     }
   }
 }
@@ -187,12 +188,9 @@ void VulkanCommandProcessor::PrepareForWait() {
   // glFlush();
   // glFinish();
 
-  context_->ClearCurrent();
 }
 
 void VulkanCommandProcessor::ReturnFromWait() {
-  context_->MakeCurrent();
-
   CommandProcessor::ReturnFromWait();
 }
 
@@ -218,20 +216,6 @@ void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
     offset ^= 0x1F;
 
     dirty_loop_constants_ |= (1 << offset);
-  } else if (index == XE_GPU_REG_DC_LUT_PWL_DATA) {
-    UpdateGammaRampValue(GammaRampType::kPWL, value);
-  } else if (index == XE_GPU_REG_DC_LUT_30_COLOR) {
-    UpdateGammaRampValue(GammaRampType::kNormal, value);
-  } else if (index >= XE_GPU_REG_DC_LUT_RW_MODE &&
-             index <= XE_GPU_REG_DC_LUTA_CONTROL) {
-    uint32_t offset = index - XE_GPU_REG_DC_LUT_RW_MODE;
-    offset ^= 0x05;
-
-    dirty_gamma_constants_ |= (1 << offset);
-
-    if (index == XE_GPU_REG_DC_LUT_RW_INDEX) {
-      gamma_ramp_rw_subindex_ = 0;
-    }
   }
 }
 
@@ -269,6 +253,8 @@ void VulkanCommandProcessor::CreateSwapImage(VkCommandBuffer setup_buffer,
 
   std::lock_guard<std::mutex> lock(swap_state_.mutex);
   swap_state_.front_buffer_texture = reinterpret_cast<uintptr_t>(image_fb);
+  swap_state_.width = extents.width;
+  swap_state_.height = extents.height;
 
   VkImageViewCreateInfo view_create_info = {
       VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -398,9 +384,9 @@ void VulkanCommandProcessor::EndFrame() {
   frame_open_ = false;
 }
 
-void VulkanCommandProcessor::PerformSwap(uint32_t frontbuffer_ptr,
-                                         uint32_t frontbuffer_width,
-                                         uint32_t frontbuffer_height) {
+void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
+                                       uint32_t frontbuffer_width,
+                                       uint32_t frontbuffer_height) {
   SCOPE_profile_cpu_f("gpu");
 
   // Build a final command buffer that copies the game's frontbuffer texture
@@ -428,6 +414,11 @@ void VulkanCommandProcessor::PerformSwap(uint32_t frontbuffer_ptr,
     frontbuffer_ptr = last_copy_base_;
   }
 
+  if (swap_state_.front_buffer_texture &&
+      (swap_state_.width != frontbuffer_width ||
+       swap_state_.height != frontbuffer_height)) {
+    DestroySwapImage();
+  }
   if (!swap_state_.front_buffer_texture) {
     CreateSwapImage(copy_commands, {frontbuffer_width, frontbuffer_height});
   }
@@ -569,12 +560,128 @@ void VulkanCommandProcessor::PerformSwap(uint32_t frontbuffer_ptr,
     texture_cache_->ClearCache();
   }
 
+  auto presenter = graphics_system_->presenter();
+  if (presenter && swap_state_.front_buffer_texture) {
+    auto aspect = graphics_system_->GetScaledAspectRatio();
+    auto swap_fb = reinterpret_cast<VkImage>(swap_state_.front_buffer_texture);
+    presenter->RefreshGuestOutput(
+        frontbuffer_width, frontbuffer_height, aspect.first, aspect.second,
+        [this, swap_fb, frontbuffer_width, frontbuffer_height](
+            ui::Presenter::GuestOutputRefreshContext& context) -> bool {
+          auto& vulkan_context = static_cast<
+              ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext&>(
+              context);
+          context.SetIs8bpc(true);
+
+          VkFence present_fence = command_buffer_pool_->BeginBatch();
+          VkCommandBuffer command_buffer = command_buffer_pool_->AcquireEntry();
+
+          VkCommandBufferBeginInfo begin_info = {
+              VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+              nullptr,
+              VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+              nullptr,
+          };
+          VkResult status = vkBeginCommandBuffer(command_buffer, &begin_info);
+          CheckResult(status, "vkBeginCommandBuffer");
+          if (status != VK_SUCCESS) {
+            command_buffer_pool_->CancelBatch();
+            return false;
+          }
+
+          VkImageMemoryBarrier image_barrier;
+          std::memset(&image_barrier, 0, sizeof(image_barrier));
+          image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+          image_barrier.srcAccessMask =
+              vulkan_context.image_ever_written_previously()
+                  ? ui::vulkan::VulkanPresenter::
+                        kGuestOutputInternalAccessMask
+                  : 0;
+          image_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+          image_barrier.oldLayout =
+              vulkan_context.image_ever_written_previously()
+                  ? ui::vulkan::VulkanPresenter::kGuestOutputInternalLayout
+                  : VK_IMAGE_LAYOUT_UNDEFINED;
+          image_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+          image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+          image_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+          image_barrier.image = vulkan_context.image();
+          image_barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0,
+                                            1};
+          vkCmdPipelineBarrier(
+              command_buffer,
+              vulkan_context.image_ever_written_previously()
+                  ? ui::vulkan::VulkanPresenter::
+                        kGuestOutputInternalStageMask
+                  : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+              &image_barrier);
+
+          VkImageBlit region;
+          region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+          region.srcOffsets[0] = {0, 0, 0};
+          region.srcOffsets[1] = {static_cast<int32_t>(frontbuffer_width),
+                                  static_cast<int32_t>(frontbuffer_height), 1};
+          region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+          region.dstOffsets[0] = {0, 0, 0};
+          region.dstOffsets[1] = {static_cast<int32_t>(frontbuffer_width),
+                                  static_cast<int32_t>(frontbuffer_height), 1};
+          vkCmdBlitImage(command_buffer, swap_fb, VK_IMAGE_LAYOUT_GENERAL,
+                         vulkan_context.image(),
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region,
+                         VK_FILTER_LINEAR);
+
+          image_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+          image_barrier.dstAccessMask =
+              ui::vulkan::VulkanPresenter::kGuestOutputInternalAccessMask;
+          image_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+          image_barrier.newLayout =
+              ui::vulkan::VulkanPresenter::kGuestOutputInternalLayout;
+          vkCmdPipelineBarrier(
+              command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+              ui::vulkan::VulkanPresenter::kGuestOutputInternalStageMask, 0, 0,
+              nullptr, 0, nullptr, 1, &image_barrier);
+
+          status = vkEndCommandBuffer(command_buffer);
+          CheckResult(status, "vkEndCommandBuffer");
+          if (status != VK_SUCCESS) {
+            command_buffer_pool_->CancelBatch();
+            return false;
+          }
+
+          command_buffer_pool_->EndBatch();
+
+          VkSubmitInfo submit_info;
+          std::memset(&submit_info, 0, sizeof(submit_info));
+          submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+          submit_info.commandBufferCount = 1;
+          submit_info.pCommandBuffers = &command_buffer;
+
+          if (queue_mutex_) {
+            queue_mutex_->lock();
+          }
+          status = vkQueueSubmit(queue_, 1, &submit_info, present_fence);
+          if (queue_mutex_) {
+            queue_mutex_->unlock();
+          }
+          CheckResult(status, "vkQueueSubmit");
+          if (status != VK_SUCCESS) {
+            return false;
+          }
+
+          status = vkWaitForFences(*device_, 1, &present_fence, VK_TRUE,
+                                   UINT64_MAX);
+          CheckResult(status, "vkWaitForFences");
+          return status == VK_SUCCESS;
+        });
+  }
+
   // Scavenging.
   {
 #if FINE_GRAINED_DRAW_SCOPES
     SCOPE_profile_cpu_i(
         "gpu",
-        "xe::gpu::vulkan::VulkanCommandProcessor::PerformSwap Scavenging");
+        "xe::gpu::vulkan::VulkanCommandProcessor::IssueSwap Scavenging");
 #endif  // FINE_GRAINED_DRAW_SCOPES
     // Command buffers must be scavenged first to avoid a race condition.
     // We don't want to reuse a batch when the caches haven't yet cleared old
@@ -608,16 +715,16 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
 #endif  // FINE_GRAINED_DRAW_SCOPES
 
   auto enable_mode =
-      static_cast<ModeControl>(regs[XE_GPU_REG_RB_MODECONTROL].u32 & 0x7);
-  if (enable_mode == ModeControl::kIgnore) {
+      static_cast<xenos::EdramMode>(regs[XE_GPU_REG_RB_MODECONTROL] & 0x7);
+  if (enable_mode == xenos::EdramMode::kNoOperation) {
     // Ignored.
     return true;
-  } else if (enable_mode == ModeControl::kCopy) {
+  } else if (enable_mode == xenos::EdramMode::kCopy) {
     // Special copy handling.
     return IssueCopy();
   }
 
-  if ((regs[XE_GPU_REG_RB_SURFACE_INFO].u32 & 0x3FFF) == 0) {
+  if ((regs[XE_GPU_REG_RB_SURFACE_INFO] & 0x3FFF) == 0) {
     // Doesn't actually draw.
     return true;
   }
@@ -631,7 +738,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     return false;
   }
   // Depth-only mode doesn't need a pixel shader (we'll use a fake one).
-  if (enable_mode == ModeControl::kDepth) {
+  if (enable_mode == xenos::EdramMode::kDepthOnly) {
     // Use a dummy pixel shader when required.
     pixel_shader = nullptr;
   } else if (!pixel_shader) {
@@ -708,7 +815,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     // Auto-indexed draw.
     uint32_t instance_count = 1;
     uint32_t first_vertex =
-        register_file_->values[XE_GPU_REG_VGT_INDX_OFFSET].u32;
+        register_file_->values[XE_GPU_REG_VGT_INDX_OFFSET];
     uint32_t first_instance = 0;
     vkCmdDraw(command_buffer, index_count, instance_count, first_vertex,
               first_instance);
@@ -717,7 +824,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     uint32_t instance_count = 1;
     uint32_t first_index = 0;
     uint32_t vertex_offset =
-        register_file_->values[XE_GPU_REG_VGT_INDX_OFFSET].u32;
+        register_file_->values[XE_GPU_REG_VGT_INDX_OFFSET];
     uint32_t first_instance = 0;
     vkCmdDrawIndexed(command_buffer, index_count, instance_count, first_index,
                      vertex_offset, first_instance);
@@ -778,8 +885,8 @@ bool VulkanCommandProcessor::PopulateIndexBuffer(
 
   // Min/max index ranges for clamping. This is often [0g,FFFF|FFFFFF].
   // All indices should be clamped to [min,max]. May be a way to do this in GL.
-  uint32_t min_index = regs[XE_GPU_REG_VGT_MIN_VTX_INDX].u32;
-  uint32_t max_index = regs[XE_GPU_REG_VGT_MAX_VTX_INDX].u32;
+  uint32_t min_index = regs[XE_GPU_REG_VGT_MIN_VTX_INDX];
+  uint32_t max_index = regs[XE_GPU_REG_VGT_MAX_VTX_INDX];
   assert_true(min_index == 0);
   assert_true(max_index == 0xFFFF || max_index == 0xFFFFFF);
 
@@ -889,14 +996,14 @@ bool VulkanCommandProcessor::IssueCopy() {
     uint32_t copy_mask;
     uint32_t copy_surface_slice;
   }* copy_regs = reinterpret_cast<decltype(copy_regs)>(
-      &regs[XE_GPU_REG_RB_COPY_CONTROL].u32);
+      &regs[XE_GPU_REG_RB_COPY_CONTROL]);
 
   struct {
     reg::PA_SC_WINDOW_OFFSET window_offset;
     reg::PA_SC_WINDOW_SCISSOR_TL window_scissor_tl;
     reg::PA_SC_WINDOW_SCISSOR_BR window_scissor_br;
   }* window_regs = reinterpret_cast<decltype(window_regs)>(
-      &regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET].u32);
+      &regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET]);
 
   // True if the source tile is a color target
   bool is_color_source = copy_regs->copy_control.copy_src_select <= 3;
@@ -925,7 +1032,7 @@ bool VulkanCommandProcessor::IssueCopy() {
 
   // RB_SURFACE_INFO
   // https://fossies.org/dox/MesaLib-10.3.5/fd2__gmem_8c_source.html
-  uint32_t surface_info = regs[XE_GPU_REG_RB_SURFACE_INFO].u32;
+  uint32_t surface_info = regs[XE_GPU_REG_RB_SURFACE_INFO];
   uint32_t surface_pitch = surface_info & 0x3FFF;
   auto surface_msaa =
       static_cast<xenos::MsaaSamples>((surface_info >> 16) & 0x3);
@@ -938,8 +1045,8 @@ bool VulkanCommandProcessor::IssueCopy() {
   uint32_t dest_logical_height = copy_dest_height;
 
   // vtx_window_offset_enable
-  assert_true(regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL].u32 & 0x00010000);
-  uint32_t window_offset = regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET].u32;
+  assert_true(regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL] & 0x00010000);
+  uint32_t window_offset = regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET];
   int32_t window_offset_x = window_regs->window_offset.window_x_offset;
   int32_t window_offset_y = window_regs->window_offset.window_y_offset;
 
@@ -977,8 +1084,10 @@ bool VulkanCommandProcessor::IssueCopy() {
   trace_writer_.WriteMemoryRead(fetch->address << 2, fetch->size * 4);
 
   // Most vertices have a negative half pixel offset applied, which we reverse.
-  auto& vtx_cntl = *(reg::PA_SU_VTX_CNTL*)&regs[XE_GPU_REG_PA_SU_VTX_CNTL].u32;
-  float vtx_offset = vtx_cntl.pix_center == 0 ? 0.5f : 0.f;
+  auto& vtx_cntl = *reinterpret_cast<reg::PA_SU_VTX_CNTL*>(
+      &regs[XE_GPU_REG_PA_SU_VTX_CNTL]);
+  float vtx_offset =
+      vtx_cntl.pix_center == xenos::PixelCenter::kD3DZero ? 0.5f : 0.f;
 
   float dest_points[6];
   for (int i = 0; i < 6; i++) {
@@ -1021,7 +1130,7 @@ bool VulkanCommandProcessor::IssueCopy() {
 
   if (!is_color_source || depth_clear_enabled) {
     // Source from or clear a depth target.
-    reg::RB_DEPTH_INFO depth_info = {regs[XE_GPU_REG_RB_DEPTH_INFO].u32};
+    reg::RB_DEPTH_INFO depth_info = {regs[XE_GPU_REG_RB_DEPTH_INFO]};
     depth_edram_base = depth_info.depth_base;
     depth_format = depth_info.depth_format;
     if (!is_color_source) {
@@ -1125,7 +1234,7 @@ bool VulkanCommandProcessor::IssueCopy() {
 
   XELOGGPU("Resolve RT {:08X} {:08X}({}) -> 0x{:08X} ({}x{}, format: {})",
            edram_base, surface_pitch, surface_pitch, copy_dest_base,
-           copy_dest_pitch, copy_dest_height, texture_info.format_info()->name);
+           copy_dest_pitch, copy_dest_height, texture_info.format_name());
   switch (copy_command) {
     case CopyCommand::kRaw:
       /*
@@ -1296,9 +1405,9 @@ bool VulkanCommandProcessor::IssueCopy() {
                        0, 0, nullptr, 0, nullptr, 1, &image_barrier);
 
   // Perform any requested clears.
-  uint32_t copy_depth_clear = regs[XE_GPU_REG_RB_DEPTH_CLEAR].u32;
-  uint32_t copy_color_clear = regs[XE_GPU_REG_RB_COLOR_CLEAR].u32;
-  uint32_t copy_color_clear_low = regs[XE_GPU_REG_RB_COLOR_CLEAR_LO].u32;
+  uint32_t copy_depth_clear = regs[XE_GPU_REG_RB_DEPTH_CLEAR];
+  uint32_t copy_color_clear = regs[XE_GPU_REG_RB_COLOR_CLEAR];
+  uint32_t copy_color_clear_low = regs[XE_GPU_REG_RB_COLOR_CLEAR_LO];
   assert_true(copy_color_clear == copy_color_clear_low);
 
   if (color_clear_enabled) {

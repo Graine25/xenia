@@ -32,13 +32,15 @@ class XInputInputDriver final : public InputDriver {
   virtual InputType GetInputType() const override;
 
  private:
+  using XInputProc = void (*)();
+
   void* module_;
-  void* XInputGetCapabilities_;
-  void* XInputGetState_;
-  void* XInputGetStateEx_;
-  void* XInputGetKeystroke_;
-  void* XInputSetState_;
-  void* XInputEnable_;
+  XInputProc XInputGetCapabilities_;
+  XInputProc XInputGetState_;
+  XInputProc XInputGetStateEx_;
+  XInputProc XInputGetKeystroke_;
+  XInputProc XInputSetState_;
+  XInputProc XInputEnable_;
 };
 
 }  // namespace xinput

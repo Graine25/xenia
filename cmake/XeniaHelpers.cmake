@@ -178,6 +178,47 @@ function(xe_shader_rules_spirv target shader_dir)
   target_sources(${target} PRIVATE ${_sources})
 endfunction()
 
+# xe_legacy_glsl_shader_rules_spirv(target shader_dir include_root)
+#
+# Compiles older GLSL shaders named with stage extensions, such as *.vert,
+# *.frag and *.geom, into generated headers under include_root/shaders/bin.
+function(xe_legacy_glsl_shader_rules_spirv target shader_dir include_root)
+  get_filename_component(shader_dir "${shader_dir}" ABSOLUTE)
+  file(GLOB _sources
+    "${shader_dir}/*.vert" "${shader_dir}/*.tesc"
+    "${shader_dir}/*.tese" "${shader_dir}/*.geom"
+    "${shader_dir}/*.frag" "${shader_dir}/*.comp")
+  if(NOT _sources)
+    return()
+  endif()
+
+  set(_script "${PROJECT_SOURCE_DIR}/tools/build/compile_shader_spirv.py")
+  set(_generated_root "${CMAKE_CURRENT_BINARY_DIR}/generated")
+  set(_bytecode_dir "${_generated_root}/${include_root}/shaders/bin")
+  set(_outputs)
+  foreach(src ${_sources})
+    get_filename_component(_name ${src} NAME)
+    string(REPLACE "." "_" _id "${_name}")
+    set(_output "${_bytecode_dir}/${_id}.h")
+    add_custom_command(
+      OUTPUT "${_output}"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${_bytecode_dir}"
+      COMMAND ${Python3_EXECUTABLE} "${_script}" "${src}" "${_output}"
+      DEPENDS "${src}" "${_script}"
+      COMMENT "Compiling legacy SPIR-V shader ${_name}..."
+      VERBATIM
+    )
+    list(APPEND _outputs "${_output}")
+  endforeach()
+
+  add_custom_target(${target}-legacy-spirv-shaders DEPENDS ${_outputs})
+  add_dependencies(${target} ${target}-legacy-spirv-shaders)
+  target_include_directories(${target} PRIVATE "${_generated_root}")
+  set_source_files_properties(${_sources} ${_outputs}
+    PROPERTIES HEADER_FILE_ONLY TRUE)
+  target_sources(${target} PRIVATE ${_sources} ${_outputs})
+endfunction()
+
 # xe_shader_rules_dxbc(target shader_dir)
 #
 # Ensures DXBC shaders are compiled before the target builds.

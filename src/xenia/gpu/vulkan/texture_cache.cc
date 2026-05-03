@@ -83,15 +83,15 @@ VkResult TextureCache::Initialize() {
   // Check some device limits
   // On low sampler counts: Rarely would we experience over 16 unique samplers.
   // This code could be refactored to scale up/down to the # of samplers.
-  auto& limits = device_->device_info().properties.limits;
-  if (limits.maxPerStageDescriptorSamplers < kMaxTextureSamplers ||
-      limits.maxPerStageDescriptorSampledImages < kMaxTextureSamplers) {
+  auto& properties = device_->properties();
+  if (properties.maxPerStageDescriptorSamplers < kMaxTextureSamplers ||
+      properties.maxPerStageDescriptorSampledImages < kMaxTextureSamplers) {
     XELOGE(
         "Physical device is unable to support required number of sampled "
         "images! Expect instability! (maxPerStageDescriptorSamplers={}, "
         "maxPerStageDescriptorSampledImages={})",
-        limits.maxPerStageDescriptorSamplers,
-        limits.maxPerStageDescriptorSampledImages);
+        properties.maxPerStageDescriptorSamplers,
+        properties.maxPerStageDescriptorSampledImages);
     // assert_always();
   }
 
@@ -132,13 +132,8 @@ VkResult TextureCache::Initialize() {
   }
 
   // Create a memory allocator for textures.
-  VmaVulkanFunctions vulkan_funcs = {};
-  ui::vulkan::FillVMAVulkanFunctions(&vulkan_funcs);
-
-  VmaAllocatorCreateInfo alloc_info = {
-      0, *device_, *device_, 0, 0, nullptr, nullptr, 0, nullptr, &vulkan_funcs,
-  };
-  status = vmaCreateAllocator(&alloc_info, &mem_allocator_);
+  mem_allocator_ = ui::vulkan::CreateVmaAllocator(device_, false);
+  status = mem_allocator_ ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
   if (status != VK_SUCCESS) {
     vkDestroyDescriptorSetLayout(*device_, texture_descriptor_set_layout_,
                                  nullptr);
@@ -192,7 +187,7 @@ TextureCache::Texture* TextureCache::AllocateTexture(
     XELOGE(
         "Texture Cache: Attempted to allocate texture format {}, which is "
         "defined as VK_FORMAT_UNDEFINED!",
-        texture_info.format_info()->name);
+        texture_info.format_name());
     return nullptr;
   }
 
@@ -237,7 +232,7 @@ TextureCache::Texture* TextureCache::AllocateTexture(
     XELOGE(
         "Texture Cache: Invalid usage flag specified on format {} ({})\n\t"
         "(requested: {})",
-        texture_info.format_info()->name, ui::vulkan::to_string(format),
+        texture_info.format_name(), ui::vulkan::to_string(format),
         ui::vulkan::to_flags_string(static_cast<VkFormatFeatureFlagBits>(
             required_flags & ~props.optimalTilingFeatures)));
   }
@@ -277,7 +272,7 @@ TextureCache::Texture* TextureCache::AllocateTexture(
         "Texture Cache: vkGetPhysicalDeviceImageFormatProperties failed with "
         "{} for {} ({}) dimension={} image_type={} usage=0x{:X} flags=0x{:X}",
         ui::vulkan::to_string(image_props_status),
-        texture_info.format_info()->name, ui::vulkan::to_string(format),
+        texture_info.format_name(), ui::vulkan::to_string(format),
         get_dimension_name(texture_info.dimension),
         static_cast<uint32_t>(image_info.imageType),
         static_cast<uint32_t>(image_info.usage),
@@ -294,7 +289,7 @@ TextureCache::Texture* TextureCache::AllocateTexture(
         "Texture Cache: Texture exceeds Vulkan image limits for {} ({}) "
         "dimension={} stacked={} cube={} requested={}x{}x{} mips={} layers={} "
         "limits={}x{}x{} mips={} layers={} usage=0x{:X} flags=0x{:X}",
-        texture_info.format_info()->name, ui::vulkan::to_string(format),
+        texture_info.format_name(), ui::vulkan::to_string(format),
         get_dimension_name(texture_info.dimension), texture_info.is_stacked,
         is_cube, image_info.extent.width, image_info.extent.height,
         image_info.extent.depth, image_info.mipLevels, image_info.arrayLayers,
@@ -548,7 +543,7 @@ TextureCache::Texture* TextureCache::DemandResolveTexture(
       fmt::format(
           "RT: 0x{:08X} - 0x{:08X} ({}, {})", texture_info.memory.base_address,
           texture_info.memory.base_address + texture_info.memory.base_size,
-          texture_info.format_info()->name,
+          texture_info.format_name(),
           get_dimension_name(texture_info.dimension)));
 
   // Setup an access watch. If this texture is touched, it is destroyed.
@@ -631,7 +626,7 @@ TextureCache::Texture* TextureCache::Demand(const TextureInfo& texture_info,
       fmt::format(
           "T: 0x{:08X} - 0x{:08X} ({}, {})", texture_info.memory.base_address,
           texture_info.memory.base_address + texture_info.memory.base_size,
-          texture_info.format_info()->name,
+          texture_info.format_name(),
           get_dimension_name(texture_info.dimension)));
 
   textures_[texture_hash] = texture;
@@ -696,17 +691,18 @@ TextureCache::TextureView* TextureCache::DemandView(Texture* texture,
       swizzle_component_map[(swizzle >> 9) & 0x7],
   };
 
-#define SWIZZLE_VECTOR(r, x)                                        \
-  {                                                                 \
-    assert_true(config.vector_swizzle.x >= 0 &&                     \
-                config.vector_swizzle.x < xe::countof(components)); \
-    view_info.components.r = components[config.vector_swizzle.x];   \
+#define SWIZZLE_VECTOR(r, x)                                      \
+  {                                                               \
+    const int vector_swizzle = static_cast<int>(config.vector_swizzle.x); \
+    assert_true(vector_swizzle >= 0 &&                            \
+                vector_swizzle < int(xe::countof(components)));   \
+    view_info.components.r = components[vector_swizzle];          \
   }
   SWIZZLE_VECTOR(r, x);
   SWIZZLE_VECTOR(g, y);
   SWIZZLE_VECTOR(b, z);
   SWIZZLE_VECTOR(a, w);
-#undef SWIZZLE_CHANNEL
+#undef SWIZZLE_VECTOR
 
   if (texture->format == VK_FORMAT_D16_UNORM_S8_UINT ||
       texture->format == VK_FORMAT_D24_UNORM_S8_UINT ||
@@ -992,7 +988,7 @@ void TextureCache::FlushPendingCommands(VkCommandBuffer command_buffer,
         vkQueueSubmit(device_queue_, 1, &submit_info, completion_fence);
     CheckResult(status, "vkQueueSubmit");
   } else {
-    std::lock_guard<std::mutex> lock(device_->primary_queue_mutex());
+    std::lock_guard<std::recursive_mutex> lock(device_->primary_queue_mutex());
 
     auto status = vkQueueSubmit(device_->primary_queue(), 1, &submit_info,
                                 completion_fence);
@@ -1098,7 +1094,7 @@ bool TextureCache::UploadTexture(VkCommandBuffer command_buffer,
       "levels: {} ({}-{}), stacked: {}, pitch: {}, tiled: {}, packed mips: {}, "
       "unpack length: 0x{:X})",
       src.memory.base_address, src.memory.mip_address, src.width + 1,
-      src.height + 1, src.depth + 1, src.format_info()->name,
+      src.height + 1, src.depth + 1, src.format_name(),
       get_dimension_name(src.dimension), src.mip_levels(), src.mip_min_level,
       src.mip_max_level, src.is_stacked ? "yes" : "no", src.pitch,
       src.is_tiled ? "yes" : "no", src.has_packed_mips ? "yes" : "no",
@@ -1375,7 +1371,7 @@ void TextureCache::WritebackTexture(Texture* texture) {
   // Submit the command buffer.
   // Submit commands and wait.
   {
-    std::lock_guard<std::mutex> lock(device_->primary_queue_mutex());
+    std::lock_guard<std::recursive_mutex> lock(device_->primary_queue_mutex());
     VkSubmitInfo submit_info = {
         VK_STRUCTURE_TYPE_SUBMIT_INFO,
         nullptr,

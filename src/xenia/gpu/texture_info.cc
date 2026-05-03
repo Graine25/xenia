@@ -8,8 +8,10 @@
  */
 
 #include "xenia/gpu/texture_info.h"
+
 #include "xenia/base/logging.h"
 #include "xenia/base/xxhash.h"
+#include "xenia/gpu/texture_util.h"
 
 namespace xe {
 namespace gpu {
@@ -135,6 +137,67 @@ const TextureExtent TextureInfo::GetMipExtent(uint32_t mip,
   }
   return TextureExtent::Calculate(format_info(), mip_width, mip_height,
                                   depth + 1, is_tiled, is_guest);
+}
+
+uint32_t TextureInfo::GetMipLocation(uint32_t mip, uint32_t* offset_x,
+                                     uint32_t* offset_y, bool is_guest) const {
+  assert_not_null(offset_x);
+  assert_not_null(offset_y);
+
+  auto get_packed_offset = [this](uint32_t mip, uint32_t* out_x,
+                                  uint32_t* out_y) {
+    uint32_t z_blocks = 0;
+    if (!texture_util::GetPackedMipOffset(width + 1, height + 1, depth + 1,
+                                          format, mip, *out_x, *out_y,
+                                          z_blocks)) {
+      *out_x = 0;
+      *out_y = 0;
+    }
+  };
+
+  if (mip == 0) {
+    if (has_packed_mips) {
+      get_packed_offset(0, offset_x, offset_y);
+    } else {
+      *offset_x = 0;
+      *offset_y = 0;
+    }
+    return memory.base_address;
+  }
+
+  if (!memory.mip_address) {
+    *offset_x = 0;
+    *offset_y = 0;
+    return 0;
+  }
+
+  uint32_t address_offset = 0;
+  auto bytes_per_block = format_info()->bytes_per_block();
+
+  if (!has_packed_mips) {
+    for (uint32_t i = 1; i < mip; i++) {
+      address_offset +=
+          GetMipExtent(i, is_guest).all_blocks() * bytes_per_block;
+    }
+    *offset_x = 0;
+    *offset_y = 0;
+    return memory.mip_address + address_offset;
+  }
+
+  uint32_t width_pow2 = xe::next_pow2(width + 1);
+  uint32_t height_pow2 = xe::next_pow2(height + 1);
+  uint32_t packed_mip_base = 1;
+  for (uint32_t i = packed_mip_base; i < mip; i++, packed_mip_base++) {
+    uint32_t mip_width = std::max(width_pow2 >> i, 1u);
+    uint32_t mip_height = std::max(height_pow2 >> i, 1u);
+    if (std::min(mip_width, mip_height) <= 16) {
+      break;
+    }
+    address_offset += GetMipExtent(i, is_guest).all_blocks() * bytes_per_block;
+  }
+
+  get_packed_offset(mip, offset_x, offset_y);
+  return memory.mip_address + address_offset;
 }
 
 void TextureInfo::GetMipSize(uint32_t mip, uint32_t* out_width,

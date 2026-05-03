@@ -16,6 +16,17 @@
 namespace xe {
 namespace ui {
 
+namespace {
+
+template <typename Function>
+bool LoadLibraryFunction(HMODULE module, const char* name,
+                         Function& out_function) {
+  out_function = reinterpret_cast<Function>(GetProcAddress(module, name));
+  return out_function != nullptr;
+}
+
+}  // namespace
+
 bool Win32WindowedAppContext::pending_functions_window_class_registered_;
 
 Win32WindowedAppContext::~Win32WindowedAppContext() {
@@ -37,32 +48,25 @@ bool Win32WindowedAppContext::Initialize() {
   shcore_module_ = LoadLibraryW(L"SHCore.dll");
   if (shcore_module_) {
     per_monitor_dpi_v1_api_available_ = true;
-    per_monitor_dpi_v1_api_available_ &=
-        (*reinterpret_cast<void**>(
-             &per_monitor_dpi_v1_api_.get_dpi_for_monitor) =
-             GetProcAddress(shcore_module_, "GetDpiForMonitor")) != nullptr;
+    per_monitor_dpi_v1_api_available_ &= LoadLibraryFunction(
+        shcore_module_, "GetDpiForMonitor",
+        per_monitor_dpi_v1_api_.get_dpi_for_monitor);
   }
   user32_module_ = LoadLibraryW(L"user32.dll");
   if (user32_module_) {
     per_monitor_dpi_v2_api_available_ = true;
-    per_monitor_dpi_v2_api_available_ &=
-        (*reinterpret_cast<void**>(
-             &per_monitor_dpi_v2_api_.adjust_window_rect_ex_for_dpi) =
-             GetProcAddress(user32_module_, "AdjustWindowRectExForDpi")) !=
-        nullptr;
-    per_monitor_dpi_v2_api_available_ &=
-        (*reinterpret_cast<void**>(
-             &per_monitor_dpi_v2_api_.enable_non_client_dpi_scaling) =
-             GetProcAddress(user32_module_, "EnableNonClientDpiScaling")) !=
-        nullptr;
-    per_monitor_dpi_v2_api_available_ &=
-        (*reinterpret_cast<void**>(
-             &per_monitor_dpi_v2_api_.get_dpi_for_system) =
-             GetProcAddress(user32_module_, "GetDpiForSystem")) != nullptr;
-    per_monitor_dpi_v2_api_available_ &=
-        (*reinterpret_cast<void**>(
-             &per_monitor_dpi_v2_api_.get_dpi_for_window) =
-             GetProcAddress(user32_module_, "GetDpiForWindow")) != nullptr;
+    per_monitor_dpi_v2_api_available_ &= LoadLibraryFunction(
+        user32_module_, "AdjustWindowRectExForDpi",
+        per_monitor_dpi_v2_api_.adjust_window_rect_ex_for_dpi);
+    per_monitor_dpi_v2_api_available_ &= LoadLibraryFunction(
+        user32_module_, "EnableNonClientDpiScaling",
+        per_monitor_dpi_v2_api_.enable_non_client_dpi_scaling);
+    per_monitor_dpi_v2_api_available_ &= LoadLibraryFunction(
+        user32_module_, "GetDpiForSystem",
+        per_monitor_dpi_v2_api_.get_dpi_for_system);
+    per_monitor_dpi_v2_api_available_ &= LoadLibraryFunction(
+        user32_module_, "GetDpiForWindow",
+        per_monitor_dpi_v2_api_.get_dpi_for_window);
   }
 
   // Create the message-only window for executing pending functions - using a

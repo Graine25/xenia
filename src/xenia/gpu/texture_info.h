@@ -293,6 +293,8 @@ struct TextureInfo {
   uint32_t GetMaxMipLevels() const;
 
   const TextureExtent GetMipExtent(uint32_t mip, bool is_guest) const;
+  uint32_t GetMipLocation(uint32_t mip, uint32_t* offset_x, uint32_t* offset_y,
+                          bool is_guest) const;
 
   void GetMipSize(uint32_t mip, uint32_t* width, uint32_t* height) const;
 

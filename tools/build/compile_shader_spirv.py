@@ -22,6 +22,15 @@ SPIRV_STAGES = {
     "gs": "geom", "ps": "frag", "cs": "comp",
 }
 
+GLSL_EXTENSION_STAGES = {
+    ".vert": "vert",
+    ".tesc": "tesc",
+    ".tese": "tese",
+    ".geom": "geom",
+    ".frag": "frag",
+    ".comp": "comp",
+}
+
 XESL_WRAPPER = (
     "#version 460\n"
     "#extension GL_EXT_control_flow_attributes : require\n"
@@ -49,6 +58,10 @@ def find_vulkan_tools():
 
 def parse_stage(filename):
     """Extract the 2-char shader stage from filename like 'foo.cs.xesl'."""
+    extension = os.path.splitext(filename)[1]
+    if extension in GLSL_EXTENSION_STAGES:
+        return extension[1:], GLSL_EXTENSION_STAGES[extension]
+
     basename = os.path.splitext(filename)[0]  # 'foo.cs'
     identifier = basename.replace(".", "_")    # 'foo_cs'
     stage_key = identifier[-2:]
@@ -74,8 +87,9 @@ def main():
         print(f"ERROR: cannot determine shader stage from: {src_name}", file=sys.stderr)
         return 1
 
-    # Compute identifier (matches what Lua does: basename with dots -> underscores)
-    identifier = os.path.splitext(src_name)[0].replace(".", "_")
+    # Compute identifier from the generated header name so legacy GLSL files
+    # like dummy.frag can emit dummy_frag rather than dummy.
+    identifier = os.path.splitext(os.path.basename(output_path))[0]
 
     glslang, spirv_opt, spirv_dis = find_vulkan_tools()
 

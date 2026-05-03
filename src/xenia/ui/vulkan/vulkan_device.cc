@@ -11,6 +11,7 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/math.h"
 #include "xenia/base/platform.h"
 
 #include <algorithm>
@@ -22,6 +23,16 @@
 namespace xe {
 namespace ui {
 namespace vulkan {
+
+namespace {
+const VulkanDevice* g_legacy_vulkan_device = nullptr;
+}
+
+const VulkanDevice* GetLegacyVulkanDevice() { return g_legacy_vulkan_device; }
+
+void RegisterLegacyVulkanDevice(const VulkanDevice* device) {
+  g_legacy_vulkan_device = device;
+}
 
 template <typename Structure, VkStructureType StructureType>
 struct VulkanFeatures {
@@ -36,6 +47,122 @@ struct VulkanFeatures {
     device_create_info.pNext = &enabled;
   }
 };
+
+VkDeviceMemory VulkanDevice::AllocateMemory(
+    VkMemoryRequirements requirements,
+    VkMemoryPropertyFlags required_properties) const {
+  uint32_t candidate_memory_types =
+      requirements.memoryTypeBits & memory_types_.device_local;
+  if (required_properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+    candidate_memory_types = requirements.memoryTypeBits & memory_types_.host_visible;
+  }
+  if (required_properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) {
+    candidate_memory_types &= memory_types_.host_coherent;
+  }
+  if (required_properties & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) {
+    candidate_memory_types &= memory_types_.host_cached;
+  }
+  if (!candidate_memory_types) {
+    candidate_memory_types = requirements.memoryTypeBits;
+  }
+
+  uint32_t memory_type_index;
+  if (!xe::bit_scan_forward(candidate_memory_types, &memory_type_index)) {
+    return VK_NULL_HANDLE;
+  }
+
+  VkMemoryAllocateInfo memory_allocate_info;
+  memory_allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  memory_allocate_info.pNext = nullptr;
+  memory_allocate_info.allocationSize = requirements.size;
+  memory_allocate_info.memoryTypeIndex = memory_type_index;
+
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  if (functions_.vkAllocateMemory(device_, &memory_allocate_info, nullptr,
+                                  &memory) != VK_SUCCESS) {
+    return VK_NULL_HANDLE;
+  }
+  return memory;
+}
+
+bool VulkanDevice::HasEnabledExtension(const char* extension_name) const {
+  (void)extension_name;
+  return false;
+}
+
+void VulkanDevice::DbgSetObjectName(uint64_t object_handle,
+                                    VkDebugReportObjectTypeEXT object_type,
+                                    const char* object_name) const {
+  if (!vulkan_instance()->extensions().ext_EXT_debug_utils) {
+    return;
+  }
+
+  VkObjectType debug_utils_type = VK_OBJECT_TYPE_UNKNOWN;
+  switch (object_type) {
+    case VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT:
+      debug_utils_type = VK_OBJECT_TYPE_SHADER_MODULE;
+      break;
+    case VK_DEBUG_REPORT_OBJECT_TYPE_PIPELINE_LAYOUT_EXT:
+      debug_utils_type = VK_OBJECT_TYPE_PIPELINE_LAYOUT;
+      break;
+    case VK_DEBUG_REPORT_OBJECT_TYPE_PIPELINE_EXT:
+      debug_utils_type = VK_OBJECT_TYPE_PIPELINE;
+      break;
+    case VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT:
+      debug_utils_type = VK_OBJECT_TYPE_RENDER_PASS;
+      break;
+    case VK_DEBUG_REPORT_OBJECT_TYPE_FRAMEBUFFER_EXT:
+      debug_utils_type = VK_OBJECT_TYPE_FRAMEBUFFER;
+      break;
+    case VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT:
+      debug_utils_type = VK_OBJECT_TYPE_IMAGE;
+      break;
+    case VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_VIEW_EXT:
+      debug_utils_type = VK_OBJECT_TYPE_IMAGE_VIEW;
+      break;
+    case VK_DEBUG_REPORT_OBJECT_TYPE_BUFFER_EXT:
+      debug_utils_type = VK_OBJECT_TYPE_BUFFER;
+      break;
+    case VK_DEBUG_REPORT_OBJECT_TYPE_SAMPLER_EXT:
+      debug_utils_type = VK_OBJECT_TYPE_SAMPLER;
+      break;
+    case VK_DEBUG_REPORT_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT_EXT:
+      debug_utils_type = VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT;
+      break;
+    default:
+      break;
+  }
+  if (debug_utils_type == VK_OBJECT_TYPE_UNKNOWN) {
+    return;
+  }
+
+  VkDebugUtilsObjectNameInfoEXT object_name_info;
+  object_name_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+  object_name_info.pNext = nullptr;
+  object_name_info.objectType = debug_utils_type;
+  object_name_info.objectHandle = object_handle;
+  object_name_info.pObjectName = object_name;
+  vulkan_instance()->functions().vkSetDebugUtilsObjectNameEXT(
+      device_, &object_name_info);
+}
+
+bool VulkanDevice::is_renderdoc_attached() const {
+  return vulkan_instance()->renderdoc_api() != nullptr;
+}
+
+void VulkanDevice::BeginRenderDocFrameCapture() const {
+  auto* renderdoc_api = vulkan_instance()->renderdoc_api();
+  if (renderdoc_api) {
+    renderdoc_api->api_1_0_0()->StartFrameCapture(nullptr, nullptr);
+  }
+}
+
+void VulkanDevice::EndRenderDocFrameCapture() const {
+  auto* renderdoc_api = vulkan_instance()->renderdoc_api();
+  if (renderdoc_api) {
+    renderdoc_api->api_1_0_0()->EndFrameCapture(nullptr, nullptr);
+  }
+}
 
 std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     const VulkanInstance* const vulkan_instance,

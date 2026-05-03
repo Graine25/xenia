@@ -30,7 +30,7 @@ class VulkanTraceDump : public TraceDump {
   void BeginHostCapture() override {
     auto device = static_cast<const ui::vulkan::VulkanProvider*>(
                       graphics_system_->provider())
-                      ->device();
+                      ->vulkan_device();
     if (device->is_renderdoc_attached()) {
       device->BeginRenderDocFrameCapture();
     }
@@ -39,7 +39,7 @@ class VulkanTraceDump : public TraceDump {
   void EndHostCapture() override {
     auto device = static_cast<const ui::vulkan::VulkanProvider*>(
                       graphics_system_->provider())
-                      ->device();
+                      ->vulkan_device();
     if (device->is_renderdoc_attached()) {
       device->EndRenderDocFrameCapture();
     }

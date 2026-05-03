@@ -118,15 +118,9 @@ VkResult BufferCache::Initialize() {
     return status;
   }
 
-  // Create a memory allocator for textures.
-  VmaVulkanFunctions vulkan_funcs = {};
-  ui::vulkan::FillVMAVulkanFunctions(&vulkan_funcs);
-
-  VmaAllocatorCreateInfo alloc_info = {
-      0, *device_, *device_, 0, 0, nullptr, nullptr, 0, nullptr, &vulkan_funcs,
-  };
-
-  status = vmaCreateAllocator(&alloc_info, &mem_allocator_);
+  // Create a memory allocator for long-lived buffers.
+  mem_allocator_ = ui::vulkan::CreateVmaAllocator(device_, false);
+  status = mem_allocator_ ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
   if (status != VK_SUCCESS) {
     return status;
   }
@@ -337,13 +331,13 @@ std::pair<VkDeviceSize, VkDeviceSize> BufferCache::UploadConstantRegisters(
   // Copy over all the registers.
   const auto& values = register_file_->values;
   uint8_t* dest_ptr = transient_buffer_->host_base() + offset;
-  std::memcpy(dest_ptr, &values[XE_GPU_REG_SHADER_CONSTANT_000_X].f32,
+  std::memcpy(dest_ptr, &values[XE_GPU_REG_SHADER_CONSTANT_000_X],
               (512 * 4 * 4));
   dest_ptr += 512 * 4 * 4;
-  std::memcpy(dest_ptr, &values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031].u32,
+  std::memcpy(dest_ptr, &values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031],
               8 * 4);
   dest_ptr += 8 * 4;
-  std::memcpy(dest_ptr, &values[XE_GPU_REG_SHADER_CONSTANT_LOOP_00].u32,
+  std::memcpy(dest_ptr, &values[XE_GPU_REG_SHADER_CONSTANT_LOOP_00],
               32 * 4);
   dest_ptr += 32 * 4;
 
@@ -394,7 +388,7 @@ std::pair<VkDeviceSize, VkDeviceSize> BufferCache::UploadConstantRegisters(
       if (piece & sh) {
         xe::copy_128_aligned(
             dest_ptr,
-            &values[XE_GPU_REG_SHADER_CONSTANT_000_X + i * 64 + j].f32, 1);
+            &values[XE_GPU_REG_SHADER_CONSTANT_000_X + i * 64 + j], 1);
         dest_ptr += 16;
       }
     }
@@ -402,14 +396,14 @@ std::pair<VkDeviceSize, VkDeviceSize> BufferCache::UploadConstantRegisters(
   for (int i = 0; i < 32; ++i) {
     if (constant_register_map.loop_bitmap & (1 << i)) {
       xe::store<uint32_t>(dest_ptr,
-                          values[XE_GPU_REG_SHADER_CONSTANT_LOOP_00 + i].u32);
+                          values[XE_GPU_REG_SHADER_CONSTANT_LOOP_00 + i]);
       dest_ptr += 4;
     }
   }
   for (int i = 0; i < 8; ++i) {
     if (constant_register_map.bool_bitmap[i]) {
       xe::store<uint32_t>(
-          dest_ptr, values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 + i].u32);
+          dest_ptr, values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 + i]);
       dest_ptr += 4;
     }
   }
@@ -431,9 +425,9 @@ std::pair<VkBuffer, VkDeviceSize> BufferCache::UploadIndexBuffer(
   const void* source_ptr = memory_->TranslatePhysical(source_addr);
 
   uint32_t prim_reset_index =
-      register_file_->values[XE_GPU_REG_VGT_MULTI_PRIM_IB_RESET_INDX].u32;
+      register_file_->values[XE_GPU_REG_VGT_MULTI_PRIM_IB_RESET_INDX];
   bool prim_reset_enabled =
-      !!(register_file_->values[XE_GPU_REG_PA_SU_SC_MODE_CNTL].u32 & (1 << 21));
+      !!(register_file_->values[XE_GPU_REG_PA_SU_SC_MODE_CNTL] & (1 << 21));
 
   // Copy data into the buffer. If primitive reset is enabled, translate any
   // primitive reset indices to something Vulkan understands.

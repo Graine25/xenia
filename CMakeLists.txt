@@ -12,6 +12,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND
+   CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
+  message(FATAL_ERROR
+    "Windows builds require MSVC-style compiler mode. Use clang-cl.exe or "
+    "cl.exe, not GNU-style clang++.exe. The xb build script defaults to "
+    "clang-cl on Windows.")
+endif()
+
 # Detect target architecture.
 # - VS generator: CMAKE_GENERATOR_PLATFORM (from -A flag) takes priority.
 # - Ninja/Makefiles: CMAKE_SYSTEM_PROCESSOR (set via -DCMAKE_SYSTEM_NAME
@@ -105,6 +113,29 @@ add_compile_definitions($<$<NOT:$<CONFIG:Checked>>:IMGUI_USE_STB_SPRINTF>)
 # Static library define
 add_compile_definitions(_LIB)
 
+# Windows-wide definitions are needed for MSVC-style Windows builds, including
+# clang-cl.
+if(WIN32)
+  add_compile_definitions(
+    _CRT_NONSTDC_NO_DEPRECATE
+    _CRT_SECURE_NO_WARNINGS
+    WIN32
+    _WIN64=1
+    UNICODE
+    _UNICODE
+    IMGUI_DISABLE_OBSOLETE_FUNCTIONS
+  )
+  if(XE_TARGET_X86_64)
+    add_compile_definitions(_AMD64=1)
+  elseif(XE_TARGET_AARCH64)
+    add_compile_definitions(_ARM64=1)
+  endif()
+
+  link_libraries(
+    ntdll wsock32 ws2_32 xinput comctl32 shcore shlwapi dxguid bcrypt
+  )
+endif()
+
 # ==============================================================================
 # Platform-specific global settings
 # ==============================================================================
@@ -114,29 +145,36 @@ if(MSVC)
   add_compile_options(
     /utf-8       # Build correctly on systems with non-Latin codepages
     /wd4201      # Nameless struct/unions are ok
-    /MP          # Multi-processor compilation
   )
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    add_compile_options(/MP)  # Multi-processor compilation
+  endif()
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options(
+      $<$<COMPILE_LANGUAGE:CXX>:/clang:-Wno-switch>
+      $<$<COMPILE_LANGUAGE:CXX>:/clang:-Wno-attributes>
+      $<$<COMPILE_LANGUAGE:CXX>:/clang:-Wno-deprecated-register>
+      $<$<COMPILE_LANGUAGE:CXX>:/clang:-Wno-deprecated-volatile>
+      $<$<COMPILE_LANGUAGE:CXX>:/clang:-Wno-deprecated-enum-enum-conversion>
+    )
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 20)
+      add_compile_options(
+        $<$<COMPILE_LANGUAGE:CXX>:/clang:-Wno-deprecated-literal-operator>
+        $<$<COMPILE_LANGUAGE:CXX>:/clang:-Wno-nontrivial-memcall>
+      )
+    endif()
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 21)
+      add_compile_options(
+        $<$<COMPILE_LANGUAGE:CXX>:/clang:-Wno-character-conversion>
+      )
+    endif()
+  endif()
   if(XE_TARGET_X86_64)
     add_compile_options(/arch:AVX)
   endif()
-  add_compile_definitions(
-    _CRT_NONSTDC_NO_DEPRECATE
-    _CRT_SECURE_NO_WARNINGS
-    WIN32
-    _WIN64=1
-    _AMD64=1
-    UNICODE
-    _UNICODE
-    IMGUI_DISABLE_OBSOLETE_FUNCTIONS
-  )
   add_link_options(
     /ignore:4006  # Ignores complaints about empty obj files
     /ignore:4221
-  )
-
-  # Global Windows system libraries
-  link_libraries(
-    ntdll wsock32 ws2_32 xinput comctl32 shcore shlwapi dxguid bcrypt
   )
   # Windows manifest for executables is handled per-target
 

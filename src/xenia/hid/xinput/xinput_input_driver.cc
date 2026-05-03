@@ -21,6 +21,21 @@ namespace xe {
 namespace hid {
 namespace xinput {
 
+namespace {
+
+using XInputProc = void (*)();
+
+XInputProc LoadXInputProc(HMODULE module, LPCSTR name) {
+  return reinterpret_cast<XInputProc>(GetProcAddress(module, name));
+}
+
+template <typename Function>
+Function XInputProcAs(XInputProc proc) {
+  return reinterpret_cast<Function>(proc);
+}
+
+}  // namespace
+
 XInputInputDriver::XInputInputDriver(xe::ui::Window* window,
                                      size_t window_z_order)
     : InputDriver(window, window_z_order),
@@ -56,14 +71,14 @@ X_STATUS XInputInputDriver::Setup() {
   auto const XInputGetStateEx = (LPCSTR)100;
 
   // Required.
-  auto xigc = GetProcAddress(module, "XInputGetCapabilities");
-  auto xigs = GetProcAddress(module, "XInputGetState");
-  auto xigsEx = GetProcAddress(module, XInputGetStateEx);
-  auto xigk = GetProcAddress(module, "XInputGetKeystroke");
-  auto xiss = GetProcAddress(module, "XInputSetState");
+  auto xigc = LoadXInputProc(module, "XInputGetCapabilities");
+  auto xigs = LoadXInputProc(module, "XInputGetState");
+  auto xigsEx = LoadXInputProc(module, XInputGetStateEx);
+  auto xigk = LoadXInputProc(module, "XInputGetKeystroke");
+  auto xiss = LoadXInputProc(module, "XInputSetState");
 
   // Not required.
-  auto xie = GetProcAddress(module, "XInputEnable");
+  auto xie = LoadXInputProc(module, "XInputEnable");
 
   // Only fail when we don't have the bare essentials;
   if (!xigc || !xigs || !xigk || !xiss) {
@@ -109,7 +124,8 @@ X_RESULT XInputInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
     return skipper;
   }
   XINPUT_CAPABILITIES native_caps;
-  auto xigc = (decltype(&XInputGetCapabilities))XInputGetCapabilities_;
+  auto xigc =
+      XInputProcAs<decltype(&XInputGetCapabilities)>(XInputGetCapabilities_);
   DWORD result =
       xigc(user_index, flags & ~X_INPUT_DEVTYPE::XINPUT_DEVTYPE_KEYBOARD,
            &native_caps);
@@ -152,8 +168,9 @@ X_RESULT XInputInputDriver::GetState(uint32_t user_index,
 
   // If the guide button is enabled use XInputGetStateEx, otherwise use the
   // default XInputGetState.
-  auto xigs = cvars::guide_button ? (decltype(&XInputGetState))XInputGetStateEx_
-                                  : (decltype(&XInputGetState))XInputGetState_;
+  auto xigs = cvars::guide_button
+                  ? XInputProcAs<decltype(&XInputGetState)>(XInputGetStateEx_)
+                  : XInputProcAs<decltype(&XInputGetState)>(XInputGetState_);
 
   DWORD result = xigs(user_index, &native_state.state);
   if (result) {
@@ -184,7 +201,7 @@ X_RESULT XInputInputDriver::SetState(uint32_t user_index,
   XINPUT_VIBRATION native_vibration;
   native_vibration.wLeftMotorSpeed = vibration->left_motor_speed;
   native_vibration.wRightMotorSpeed = vibration->right_motor_speed;
-  auto xiss = (decltype(&XInputSetState))XInputSetState_;
+  auto xiss = XInputProcAs<decltype(&XInputSetState)>(XInputSetState_);
   DWORD result = xiss(user_index, &native_vibration);
   if (result == ERROR_DEVICE_NOT_CONNECTED) {
     set_skip(user_index);
@@ -208,7 +225,8 @@ X_RESULT XInputInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
   // would fail so we need to skip it.
   if (user_index != XUserIndexAny) {
     XINPUT_CAPABILITIES caps;
-    auto xigc = (decltype(&XInputGetCapabilities))XInputGetCapabilities_;
+    auto xigc =
+        XInputProcAs<decltype(&XInputGetCapabilities)>(XInputGetCapabilities_);
     result = xigc(user_index, 0, &caps);
     if (result) {
       return result;
@@ -216,7 +234,7 @@ X_RESULT XInputInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
   }
 
   XINPUT_KEYSTROKE native_keystroke;
-  auto xigk = (decltype(&XInputGetKeystroke))XInputGetKeystroke_;
+  auto xigk = XInputProcAs<decltype(&XInputGetKeystroke)>(XInputGetKeystroke_);
   result = xigk(user_index, 0, &native_keystroke);
   if (result) {
     return result;

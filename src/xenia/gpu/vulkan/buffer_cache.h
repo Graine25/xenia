@@ -19,7 +19,8 @@
 #include "xenia/ui/vulkan/vulkan.h"
 #include "xenia/ui/vulkan/vulkan_device.h"
 
-#include "third_party/vulkan/vk_mem_alloc.h"
+#include "xenia/ui/vulkan/vulkan_mem_alloc.h"
+#define XXH_STATIC_LINKING_ONLY
 #include "third_party/xxhash/xxhash.h"
 
 #include <map>

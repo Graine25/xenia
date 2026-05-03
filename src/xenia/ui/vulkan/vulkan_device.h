@@ -13,6 +13,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "xenia/ui/vulkan/vulkan_instance.h"
@@ -210,7 +211,40 @@ class VulkanDevice {
 #undef XE_UI_VULKAN_FUNCTION
   };
 
+  using DeviceFunctions = Functions;
+
   const Functions& functions() const { return functions_; }
+  const Functions& dfn() const { return functions_; }
+  operator VkDevice() const { return device_; }
+
+  uint32_t queue_family_index() const { return queue_family_graphics_compute(); }
+  VkQueue primary_queue() const {
+    return queue_families_[queue_family_graphics_compute_].queues[0]->queue;
+  }
+  std::recursive_mutex& primary_queue_mutex() const {
+    return queue_families_[queue_family_graphics_compute_].queues[0]->mutex;
+  }
+
+  VkQueue AcquireQueue(uint32_t) const { return VK_NULL_HANDLE; }
+  void ReleaseQueue(VkQueue, uint32_t) const {}
+
+  VkDeviceMemory AllocateMemory(
+      VkMemoryRequirements requirements,
+      VkMemoryPropertyFlags required_properties = 0) const;
+
+  bool HasEnabledExtension(const char* extension_name) const;
+
+  void DbgSetObjectName(uint64_t object_handle,
+                        VkDebugReportObjectTypeEXT object_type,
+                        const char* object_name) const;
+  void DbgSetObjectName(uint64_t object_handle,
+                        VkDebugReportObjectTypeEXT object_type,
+                        const std::string& object_name) const {
+    DbgSetObjectName(object_handle, object_type, object_name.c_str());
+  }
+  bool is_renderdoc_attached() const;
+  void BeginRenderDocFrameCapture() const;
+  void EndRenderDocFrameCapture() const;
 
   template <typename Object>
   void SetObjectName(const VkObjectType object_type, const Object object_handle,

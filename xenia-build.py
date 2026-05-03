@@ -131,7 +131,7 @@ def import_subprocess_environment(args):
         "WindowsSdkDir",
         "PROGRAMFILES",
         "ProgramFiles(x86)",
-        "VULKAN_SDK"
+        "VULKAN_SDK",
         "CC",
         "CXX",
         )
@@ -634,7 +634,39 @@ def get_cc(cc=None):
                 return "gcc"
         return "clang"
     if sys.platform == "win32":
-        return "msc"
+        return "clang"
+
+
+def get_windows_clang_cl_binary():
+    """Finds clang-cl, preferring the Visual Studio-bundled LLVM toolchain."""
+    if sys.platform != "win32":
+        return None
+
+    candidate_paths = []
+    vc_install_dir = os.environ.get("VCINSTALLDIR")
+    if vc_install_dir:
+        candidate_paths += [
+            os.path.join(vc_install_dir, "Tools", "Llvm", "x64", "bin",
+                         "clang-cl.exe"),
+            os.path.join(vc_install_dir, "Tools", "Llvm", "arm64", "bin",
+                         "clang-cl.exe"),
+        ]
+
+    path_binary = get_bin("clang-cl")
+    if path_binary:
+        candidate_paths.append(path_binary)
+
+    program_files = os.environ.get("ProgramFiles")
+    if program_files:
+        candidate_paths.append(
+            os.path.join(program_files, "LLVM", "bin", "clang-cl.exe"))
+
+    for candidate_path in candidate_paths:
+        if os.path.isfile(candidate_path) and os.access(candidate_path, os.X_OK):
+            return candidate_path
+
+    return None
+
 
 def get_clang_format_binary():
     """Finds a clang-format binary. Aborts if none is found.
@@ -761,6 +793,33 @@ def run_cmake_configure(build_type="Release", cc=None, build_tests=False,
         args += [
             f"-DCMAKE_C_COMPILER={c_compiler}",
             f"-DCMAKE_CXX_COMPILER={cxx_compiler}",
+        ]
+    elif not (platform.machine() in ("ARM64", "aarch64") or target_arch == "arm64"):
+        if not cc:
+            cc = get_cc(cc=cc)
+        if cc == "gcc":
+            print_error("GCC is not supported for Windows builds. Use clang-cl or MSVC.")
+            return 1
+        if cc == "msc":
+            cl_exe = get_bin("cl")
+            if not cl_exe:
+                print_error("cl.exe was not found. Install Visual Studio C++ build tools.")
+                return 1
+            compiler = cl_exe
+            print(f"  Using MSVC compiler: {compiler}")
+        else:
+            compiler = get_windows_clang_cl_binary()
+            if not compiler:
+                print_error(
+                    "clang-cl.exe was not found. Install the Visual Studio LLVM "
+                    "toolset or LLVM for Windows.")
+                return 1
+            print(f"  Using clang-cl compiler: {compiler}")
+
+        compiler = compiler.replace(os.sep, "/")
+        args += [
+            f"-DCMAKE_C_COMPILER={compiler}",
+            f"-DCMAKE_CXX_COMPILER={compiler}",
         ]
     elif platform.machine() in ("ARM64", "aarch64") or target_arch == "arm64":
         # Determine the effective target and the appropriate compiler/environment.

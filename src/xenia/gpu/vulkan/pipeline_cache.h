@@ -10,8 +10,10 @@
 #ifndef XENIA_GPU_VULKAN_PIPELINE_CACHE_H_
 #define XENIA_GPU_VULKAN_PIPELINE_CACHE_H_
 
+#include <memory>
 #include <unordered_map>
 
+#define XXH_STATIC_LINKING_ONLY
 #include "third_party/xxhash/xxhash.h"
 
 #include "xenia/gpu/register_file.h"
@@ -19,13 +21,26 @@
 #include "xenia/gpu/vulkan/render_cache.h"
 #include "xenia/gpu/vulkan/vulkan_shader.h"
 #include "xenia/gpu/xenos.h"
-#include "xenia/ui/spirv/spirv_disassembler.h"
 #include "xenia/ui/vulkan/vulkan.h"
 #include "xenia/ui/vulkan/vulkan_device.h"
 
 namespace xe {
 namespace gpu {
 namespace vulkan {
+
+// Push constants embedded within the command buffer. This matches the legacy
+// Vulkan renderer shader interface.
+struct SpirvPushConstants {
+  float window_scale[4];
+  float vtx_fmt[4];
+  float point_size[4];
+  float alpha_test[4];
+  float color_exp_bias[4];
+  uint32_t ps_param_gen;
+};
+static_assert(sizeof(SpirvPushConstants) <= 128,
+              "Push constants must fit <= 128b");
+constexpr uint32_t kSpirvPushConstantsSize = sizeof(SpirvPushConstants);
 
 // Configures and caches pipelines based on render state.
 // This is responsible for properly setting all state required for a draw
@@ -94,8 +109,6 @@ class PipelineCache {
 
   // Reusable shader translator.
   std::unique_ptr<ShaderTranslator> shader_translator_ = nullptr;
-  // Disassembler used to get the SPIRV disasm. Only used in debug.
-  xe::ui::spirv::SpirvDisassembler disassembler_;
   // All loaded shaders mapped by their guest hash key.
   std::unordered_map<uint64_t, VulkanShader*> shader_map_;
 

@@ -137,7 +137,7 @@
 #define XE_MSVC_ASSUME(...) static_cast<void>(0)
 
 #endif
-#if XE_COMPILER_HAS_MSVC_EXTENSIONS == 1
+#if XE_COMPILER_MSVC == 1 && XE_COMPILER_CLANG_CL != 1
 #define XE_MSVC_OPTIMIZE_SMALL() __pragma(optimize("s", on))
 #define XE_MSVC_OPTIMIZE_REVERT() __pragma(optimize("", on))
 #else

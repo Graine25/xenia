@@ -655,18 +655,18 @@ bool RenderCache::dirty() const {
   auto& cur_regs = shadow_registers_;
 
   bool dirty = false;
-  dirty |= cur_regs.rb_modecontrol.value != regs[XE_GPU_REG_RB_MODECONTROL].u32;
+  dirty |= cur_regs.rb_modecontrol.value != regs[XE_GPU_REG_RB_MODECONTROL];
   dirty |=
-      cur_regs.rb_surface_info.value != regs[XE_GPU_REG_RB_SURFACE_INFO].u32;
-  dirty |= cur_regs.rb_color_info.value != regs[XE_GPU_REG_RB_COLOR_INFO].u32;
-  dirty |= cur_regs.rb_color1_info.value != regs[XE_GPU_REG_RB_COLOR1_INFO].u32;
-  dirty |= cur_regs.rb_color2_info.value != regs[XE_GPU_REG_RB_COLOR2_INFO].u32;
-  dirty |= cur_regs.rb_color3_info.value != regs[XE_GPU_REG_RB_COLOR3_INFO].u32;
-  dirty |= cur_regs.rb_depth_info.value != regs[XE_GPU_REG_RB_DEPTH_INFO].u32;
+      cur_regs.rb_surface_info.value != regs[XE_GPU_REG_RB_SURFACE_INFO];
+  dirty |= cur_regs.rb_color_info.value != regs[XE_GPU_REG_RB_COLOR_INFO];
+  dirty |= cur_regs.rb_color1_info.value != regs[XE_GPU_REG_RB_COLOR1_INFO];
+  dirty |= cur_regs.rb_color2_info.value != regs[XE_GPU_REG_RB_COLOR2_INFO];
+  dirty |= cur_regs.rb_color3_info.value != regs[XE_GPU_REG_RB_COLOR3_INFO];
+  dirty |= cur_regs.rb_depth_info.value != regs[XE_GPU_REG_RB_DEPTH_INFO];
   dirty |= cur_regs.pa_sc_window_scissor_tl !=
-           regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL].u32;
+           regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL];
   dirty |= cur_regs.pa_sc_window_scissor_br !=
-           regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR].u32;
+           regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR];
   return dirty;
 }
 
@@ -815,7 +815,7 @@ bool RenderCache::ParseConfiguration(RenderConfiguration* config) {
   config->surface_height_px = 2560;
 
   // Color attachment configuration.
-  if (config->mode_control == ModeControl::kColorDepth) {
+  if (config->mode_control == xenos::EdramMode::kColorDepth) {
     reg::RB_COLOR_INFO color_info[4] = {
         regs.rb_color_info,
         regs.rb_color1_info,
@@ -835,8 +835,8 @@ bool RenderCache::ParseConfiguration(RenderConfiguration* config) {
   }
 
   // Depth/stencil attachment configuration.
-  if (config->mode_control == ModeControl::kColorDepth ||
-      config->mode_control == ModeControl::kDepth) {
+  if (config->mode_control == xenos::EdramMode::kColorDepth ||
+      config->mode_control == xenos::EdramMode::kDepthOnly) {
     config->depth_stencil.edram_base = regs.rb_depth_info.depth_base;
     config->depth_stencil.format = regs.rb_depth_info.depth_format;
   } else {
@@ -1391,7 +1391,7 @@ void RenderCache::FillEDRAM(VkCommandBuffer command_buffer, uint32_t value) {
 }
 
 bool RenderCache::SetShadowRegister(uint32_t* dest, uint32_t register_name) {
-  uint32_t value = register_file_->values[register_name].u32;
+  uint32_t value = register_file_->values[register_name];
   if (*dest == value) {
     return false;
   }

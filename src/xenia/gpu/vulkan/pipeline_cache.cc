@@ -9,11 +9,13 @@
 
 #include "xenia/gpu/vulkan/pipeline_cache.h"
 
+#include <algorithm>
 #include "third_party/xxhash/xxhash.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/string_buffer.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/vulkan/vulkan_gpu_flags.h"
 
@@ -36,7 +38,9 @@ using xe::ui::vulkan::CheckResult;
 PipelineCache::PipelineCache(RegisterFile* register_file,
                              ui::vulkan::VulkanDevice* device)
     : register_file_(register_file), device_(device) {
-  shader_translator_.reset(new SpirvShaderTranslator());
+  SpirvShaderTranslator::Features features(device_);
+  shader_translator_ = std::make_unique<SpirvShaderTranslator>(
+      features, false, false, false);
 }
 
 PipelineCache::~PipelineCache() { Shutdown(); }
@@ -340,7 +344,7 @@ VkPipeline PipelineCache::GetPipeline(const RenderState* render_state,
   auto result = vkCreateGraphicsPipelines(*device_, pipeline_cache_, 1,
                                           &pipeline_info, nullptr, &pipeline);
   if (result != VK_SUCCESS) {
-    XELOGE("vkCreateGraphicsPipelines failed with code {}", result);
+    XELOGE("vkCreateGraphicsPipelines failed with code {}", int32_t(result));
     assert_always();
     return nullptr;
   }
@@ -349,7 +353,7 @@ VkPipeline PipelineCache::GetPipeline(const RenderState* render_state,
   if (cvars::vulkan_dump_disasm) {
     if (device_->HasEnabledExtension(VK_AMD_SHADER_INFO_EXTENSION_NAME)) {
       DumpShaderDisasmAMD(pipeline);
-    } else if (device_->device_info().properties.vendorID == 0x10DE) {
+    } else if (device_->properties().vendorID == 0x10DE) {
       // NVIDIA cards
       DumpShaderDisasmNV(pipeline_info);
     }
@@ -364,16 +368,32 @@ VkPipeline PipelineCache::GetPipeline(const RenderState* render_state,
 
 bool PipelineCache::TranslateShader(VulkanShader* shader,
                                     reg::SQ_PROGRAM_CNTL cntl) {
-  // Perform translation.
-  // If this fails the shader will be marked as invalid and ignored later.
-  if (!shader_translator_->Translate(shader, cntl)) {
+  if (!shader->is_ucode_analyzed()) {
+    StringBuffer ucode_disasm_buffer;
+    shader->AnalyzeUcode(ucode_disasm_buffer);
+  }
+
+  uint32_t register_count =
+      shader->type() == xenos::ShaderType::kVertex ? cntl.vs_num_reg
+                                                   : cntl.ps_num_reg;
+  uint64_t modification =
+      shader->type() == xenos::ShaderType::kVertex
+          ? shader_translator_->GetDefaultVertexShaderModification(
+                shader->GetDynamicAddressableRegisterCount(register_count))
+          : shader_translator_->GetDefaultPixelShaderModification(
+                shader->GetDynamicAddressableRegisterCount(register_count));
+
+  Shader::Translation& translation = *shader->GetOrCreateTranslation(
+      modification);
+  if (!translation.is_translated() &&
+      !shader_translator_->TranslateAnalyzedShader(translation)) {
     XELOGE("Shader translation failed; marking shader as ignored");
     return false;
   }
 
   // Prepare the shader for use (creates our VkShaderModule).
   // It could still fail at this point.
-  if (!shader->Prepare()) {
+  if (!translation.is_valid() || !shader->Prepare(translation)) {
     XELOGE("Shader preparation failed; marking shader as ignored");
     return false;
   }
@@ -719,16 +739,16 @@ bool PipelineCache::SetDynamicState(VkCommandBuffer command_buffer,
   if (cull_mode != 1) {
     // Front faces are not culled.
     depth_bias_scales[0] =
-        register_file_->values[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE].f32;
+        register_file_->Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE);
     depth_bias_offsets[0] =
-        register_file_->values[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET].f32;
+        register_file_->Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET);
   }
   if (cull_mode != 2) {
     // Back faces are not culled.
     depth_bias_scales[1] =
-        register_file_->values[XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE].f32;
+        register_file_->Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE);
     depth_bias_offsets[1] =
-        register_file_->values[XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET].f32;
+        register_file_->Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET);
   }
   if (depth_bias_scales[0] != 0.0f || depth_bias_scales[1] != 0.0f ||
       depth_bias_offsets[0] != 0.0f || depth_bias_offsets[1] != 0.0f) {
@@ -919,7 +939,7 @@ bool PipelineCache::SetDynamicState(VkCommandBuffer command_buffer,
 }
 
 bool PipelineCache::SetShadowRegister(uint32_t* dest, uint32_t register_name) {
-  uint32_t value = register_file_->values[register_name].u32;
+  uint32_t value = register_file_->values[register_name];
   if (*dest == value) {
     return false;
   }
@@ -928,7 +948,7 @@ bool PipelineCache::SetShadowRegister(uint32_t* dest, uint32_t register_name) {
 }
 
 bool PipelineCache::SetShadowRegister(float* dest, uint32_t register_name) {
-  float value = register_file_->values[register_name].f32;
+  float value = register_file_->Get<float>(register_name);
   if (*dest == value) {
     return false;
   }
@@ -940,7 +960,7 @@ bool PipelineCache::SetShadowRegisterArray(uint32_t* dest, uint32_t num,
                                            uint32_t register_name) {
   bool dirty = false;
   for (uint32_t i = 0; i < num; i++) {
-    uint32_t value = register_file_->values[register_name + i].u32;
+    uint32_t value = register_file_->values[register_name + i];
     if (dest[i] == value) {
       continue;
     }
@@ -1006,7 +1026,7 @@ PipelineCache::UpdateStatus PipelineCache::UpdateRenderTargetState() {
     reg::RB_COLOR_INFO rb_color2_info;
     reg::RB_COLOR_INFO rb_color3_info;
   }* cur_regs = reinterpret_cast<decltype(cur_regs)>(
-      &register_file_->values[XE_GPU_REG_RB_COLOR_INFO].u32);
+      &register_file_->values[XE_GPU_REG_RB_COLOR_INFO]);
 
   dirty |=
       regs.rb_color_info.color_format != cur_regs->rb_color_info.color_format;
@@ -1040,12 +1060,12 @@ PipelineCache::UpdateStatus PipelineCache::UpdateShaderStages(
 
   // These are the constant base addresses/ranges for shaders.
   // We have these hardcoded right now cause nothing seems to differ.
-  assert_true(register_file_->values[XE_GPU_REG_SQ_VS_CONST].u32 ==
+  assert_true(register_file_->values[XE_GPU_REG_SQ_VS_CONST] ==
                   0x000FF000 ||
-              register_file_->values[XE_GPU_REG_SQ_VS_CONST].u32 == 0x00000000);
-  assert_true(register_file_->values[XE_GPU_REG_SQ_PS_CONST].u32 ==
+              register_file_->values[XE_GPU_REG_SQ_VS_CONST] == 0x00000000);
+  assert_true(register_file_->values[XE_GPU_REG_SQ_PS_CONST] ==
                   0x000FF100 ||
-              register_file_->values[XE_GPU_REG_SQ_PS_CONST].u32 == 0x00000000);
+              register_file_->values[XE_GPU_REG_SQ_PS_CONST] == 0x00000000);
 
   bool dirty = false;
   dirty |= SetShadowRegister(&regs.pa_su_sc_mode_cntl,
@@ -1201,7 +1221,7 @@ PipelineCache::UpdateStatus PipelineCache::UpdateInputAssemblyState(
       break;
     default:
     case xenos::PrimitiveType::kTriangleWithWFlags:
-      XELOGE("unsupported primitive type {}", primitive_type);
+      XELOGE("unsupported primitive type {}", uint32_t(primitive_type));
       assert_unhandled_case(primitive_type);
       return UpdateStatus::kError;
   }
@@ -1269,16 +1289,16 @@ PipelineCache::UpdateStatus PipelineCache::UpdateRasterizationState(
   uint32_t cull_mode = regs.pa_su_sc_mode_cntl & 0x3;
   if (cull_mode != 1) {
     float depth_bias_scale =
-        register_file_->values[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE].f32;
+        register_file_->Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE);
     float depth_bias_offset =
-        register_file_->values[XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET].f32;
+        register_file_->Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET);
     depth_bias_enable = (depth_bias_scale != 0.0f && depth_bias_offset != 0.0f);
   }
   if (!depth_bias_enable && cull_mode != 2) {
     float depth_bias_scale =
-        register_file_->values[XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE].f32;
+        register_file_->Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE);
     float depth_bias_offset =
-        register_file_->values[XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET].f32;
+        register_file_->Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET);
     depth_bias_enable = (depth_bias_scale != 0.0f && depth_bias_offset != 0.0f);
   }
   if (regs.pa_su_poly_offset_enable !=
@@ -1522,7 +1542,7 @@ PipelineCache::UpdateStatus PipelineCache::UpdateColorBlendState() {
   state_info.logicOpEnable = VK_FALSE;
   state_info.logicOp = VK_LOGIC_OP_NO_OP;
 
-  auto enable_mode = static_cast<xenos::ModeControl>(regs.rb_modecontrol & 0x7);
+  auto enable_mode = static_cast<xenos::EdramMode>(regs.rb_modecontrol & 0x7);
 
   static const VkBlendFactor kBlendFactorMap[] = {
       /*  0 */ VK_BLEND_FACTOR_ZERO,
@@ -1577,7 +1597,7 @@ PipelineCache::UpdateStatus PipelineCache::UpdateColorBlendState() {
     // Lines up with VkColorComponentFlagBits, where R=bit 1, G=bit 2, etc..
     uint32_t write_mask = (regs.rb_color_mask >> (i * 4)) & 0xF;
     attachment_state.colorWriteMask =
-        enable_mode == xenos::ModeControl::kColorDepth ? write_mask : 0;
+        enable_mode == xenos::EdramMode::kColorDepth ? write_mask : 0;
   }
 
   state_info.attachmentCount = 4;

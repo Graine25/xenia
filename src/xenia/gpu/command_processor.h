@@ -198,11 +198,9 @@ class CommandProcessor {
   virtual void WriteRegister(uint32_t index, uint32_t value);
 
   // mem has big-endian register values
-  XE_FORCEINLINE
   virtual void WriteRegistersFromMem(uint32_t start_index, uint32_t* base,
                                      uint32_t num_registers);
 
-  XE_FORCEINLINE
   virtual void WriteRegisterRangeFromRing(xe::RingBuffer* ring, uint32_t base,
                                           uint32_t num_registers);
 
