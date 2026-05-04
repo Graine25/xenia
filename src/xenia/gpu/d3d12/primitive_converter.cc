@@ -25,40 +25,36 @@ DEFINE_bool(d3d12_convert_quads_to_triangles, false,
             "Convert quad lists to triangle lists on the CPU instead of using "
             "a geometry shader. Not recommended for playing, for debugging "
             "primarily (because PIX fails to display vertices when a geometry "
-            "shader is used).",
+            "shader is used), and this way quads can't be discarded correctly "
+            "when the game uses vertex kill functionality.",
             "D3D12");
 
 namespace xe {
 namespace gpu {
 namespace d3d12 {
 
-constexpr uint32_t PrimitiveConverter::kMaxNonIndexedVertices;
-constexpr uint32_t PrimitiveConverter::kStaticIBTriangleFanOffset;
-constexpr uint32_t PrimitiveConverter::kStaticIBTriangleFanCount;
-constexpr uint32_t PrimitiveConverter::kStaticIBQuadOffset;
-constexpr uint32_t PrimitiveConverter::kStaticIBQuadCount;
-constexpr uint32_t PrimitiveConverter::kStaticIBTotalCount;
-
-PrimitiveConverter::PrimitiveConverter(D3D12CommandProcessor* command_processor,
-                                       RegisterFile* register_file,
-                                       Memory* memory)
+PrimitiveConverter::PrimitiveConverter(D3D12CommandProcessor& command_processor,
+                                       const RegisterFile& register_file,
+                                       Memory& memory,
+                                       TraceWriter& trace_writer)
     : command_processor_(command_processor),
       register_file_(register_file),
-      memory_(memory) {
+      memory_(memory),
+      trace_writer_(trace_writer) {
   system_page_size_ = uint32_t(memory::page_size());
 }
 
 PrimitiveConverter::~PrimitiveConverter() { Shutdown(); }
 
 bool PrimitiveConverter::Initialize() {
-  auto context = command_processor_->GetD3D12Context();
-  auto device = context->GetD3D12Provider()->GetDevice();
+  auto device =
+      command_processor_.GetD3D12Context().GetD3D12Provider().GetDevice();
 
   // There can be at most 65535 indices in a Xenos draw call, but they can be up
   // to 4 bytes large, and conversion can add more indices (almost triple the
   // count for triangle strips, for instance).
   buffer_pool_ =
-      std::make_unique<ui::d3d12::UploadBufferPool>(context, 4 * 1024 * 1024);
+      std::make_unique<ui::d3d12::UploadBufferPool>(device, 4 * 1024 * 1024);
 
   // Create the static index buffer for non-indexed drawing.
   D3D12_RESOURCE_DESC static_ib_desc;
@@ -110,7 +106,7 @@ bool PrimitiveConverter::Initialize() {
   }
   static_ib_upload_->Unmap(0, nullptr);
   // Not uploaded yet.
-  static_ib_upload_frame_ = UINT64_MAX;
+  static_ib_upload_submission_ = UINT64_MAX;
   if (FAILED(device->CreateCommittedResource(
           &ui::d3d12::util::kHeapPropertiesDefault, D3D12_HEAP_FLAG_NONE,
           &static_ib_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
@@ -122,16 +118,18 @@ bool PrimitiveConverter::Initialize() {
   static_ib_gpu_address_ = static_ib_->GetGPUVirtualAddress();
 
   memory_regions_invalidated_.store(0ull, std::memory_order_relaxed);
-  physical_write_watch_handle_ =
-      memory_->RegisterPhysicalWriteWatch(MemoryWriteCallbackThunk, this);
+  memory_invalidation_callback_handle_ =
+      memory_.RegisterPhysicalMemoryInvalidationCallback(
+          MemoryInvalidationCallbackThunk, this);
 
   return true;
 }
 
 void PrimitiveConverter::Shutdown() {
-  if (physical_write_watch_handle_ != nullptr) {
-    memory_->UnregisterPhysicalWriteWatch(physical_write_watch_handle_);
-    physical_write_watch_handle_ = nullptr;
+  if (memory_invalidation_callback_handle_ != nullptr) {
+    memory_.UnregisterPhysicalMemoryInvalidationCallback(
+        memory_invalidation_callback_handle_);
+    memory_invalidation_callback_handle_ = nullptr;
   }
   ui::d3d12::util::ReleaseAndNull(static_ib_);
   ui::d3d12::util::ReleaseAndNull(static_ib_upload_);
@@ -140,44 +138,44 @@ void PrimitiveConverter::Shutdown() {
 
 void PrimitiveConverter::ClearCache() { buffer_pool_->ClearCache(); }
 
-void PrimitiveConverter::BeginFrame() {
+void PrimitiveConverter::CompletedSubmissionUpdated() {
+  if (static_ib_upload_ && command_processor_.GetCompletedSubmission() >=
+                               static_ib_upload_submission_) {
+    // Completely uploaded - release the upload buffer.
+    static_ib_upload_->Release();
+    static_ib_upload_ = nullptr;
+  }
+}
+
+void PrimitiveConverter::BeginSubmission() {
   // Got a command list now - upload and transition the static index buffer if
   // needed.
-  if (static_ib_upload_ != nullptr) {
-    auto context = command_processor_->GetD3D12Context();
-    if (static_ib_upload_frame_ == UINT64_MAX) {
-      // Not uploaded yet - upload.
-      command_processor_->GetDeferredCommandList()->D3DCopyResource(
-          static_ib_, static_ib_upload_);
-      command_processor_->PushTransitionBarrier(
-          static_ib_, D3D12_RESOURCE_STATE_COPY_DEST,
-          D3D12_RESOURCE_STATE_INDEX_BUFFER);
-      static_ib_upload_frame_ = context->GetCurrentFrame();
-    } else if (context->GetLastCompletedFrame() >= static_ib_upload_frame_) {
-      // Completely uploaded - release the upload buffer.
-      static_ib_upload_->Release();
-      static_ib_upload_ = nullptr;
-    }
+  if (static_ib_upload_ && static_ib_upload_submission_ == UINT64_MAX) {
+    command_processor_.GetDeferredCommandList().D3DCopyResource(
+        static_ib_, static_ib_upload_);
+    command_processor_.PushTransitionBarrier(static_ib_,
+                                             D3D12_RESOURCE_STATE_COPY_DEST,
+                                             D3D12_RESOURCE_STATE_INDEX_BUFFER);
+    static_ib_upload_submission_ = command_processor_.GetCurrentSubmission();
   }
+}
 
-  buffer_pool_->BeginFrame();
-
+void PrimitiveConverter::BeginFrame() {
+  buffer_pool_->Reclaim(command_processor_.GetCompletedFrame());
   converted_indices_cache_.clear();
   memory_regions_used_ = 0;
 }
 
-void PrimitiveConverter::EndFrame() { buffer_pool_->EndFrame(); }
-
-PrimitiveType PrimitiveConverter::GetReplacementPrimitiveType(
-    PrimitiveType type) {
+xenos::PrimitiveType PrimitiveConverter::GetReplacementPrimitiveType(
+    xenos::PrimitiveType type) {
   switch (type) {
-    case PrimitiveType::kTriangleFan:
-      return PrimitiveType::kTriangleList;
-    case PrimitiveType::kLineLoop:
-      return PrimitiveType::kLineStrip;
-    case PrimitiveType::kQuadList:
+    case xenos::PrimitiveType::kTriangleFan:
+      return xenos::PrimitiveType::kTriangleList;
+    case xenos::PrimitiveType::kLineLoop:
+      return xenos::PrimitiveType::kLineStrip;
+    case xenos::PrimitiveType::kQuadList:
       if (cvars::d3d12_convert_quads_to_triangles) {
-        return PrimitiveType::kTriangleList;
+        return xenos::PrimitiveType::kTriangleList;
       }
       break;
     default:
@@ -187,12 +185,12 @@ PrimitiveType PrimitiveConverter::GetReplacementPrimitiveType(
 }
 
 PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
-    PrimitiveType source_type, uint32_t address, uint32_t index_count,
-    IndexFormat index_format, Endian index_endianness,
+    xenos::PrimitiveType source_type, uint32_t address, uint32_t index_count,
+    xenos::IndexFormat index_format, xenos::Endian index_endianness,
     D3D12_GPU_VIRTUAL_ADDRESS& gpu_address_out, uint32_t& index_count_out) {
-  bool index_32bit = index_format == IndexFormat::kInt32;
-  auto& regs = *register_file_;
-  bool reset = (regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL].u32 & (1 << 21)) != 0;
+  bool index_32bit = index_format == xenos::IndexFormat::kInt32;
+  const auto& regs = register_file_;
+  bool reset = regs.Get<reg::PA_SU_SC_MODE_CNTL>().multi_prim_ib_ena;
   // Swap the reset index because we will be comparing unswapped values to it.
   uint32_t reset_index = xenos::GpuSwap(
       regs[XE_GPU_REG_VGT_MULTI_PRIM_IB_RESET_INDX].u32, index_endianness);
@@ -202,22 +200,22 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
   uint32_t reset_index_host = index_32bit ? 0xFFFFFFFFu : 0xFFFFu;
 
   // Degenerate line loops are just lines.
-  if (source_type == PrimitiveType::kLineLoop && index_count <= 2) {
-    source_type = PrimitiveType::kLineStrip;
+  if (source_type == xenos::PrimitiveType::kLineLoop && index_count <= 2) {
+    source_type = xenos::PrimitiveType::kLineStrip;
   }
 
   // Check if need to convert at all.
-  if (source_type == PrimitiveType::kTriangleStrip ||
-      source_type == PrimitiveType::kLineStrip) {
+  if (source_type == xenos::PrimitiveType::kTriangleStrip ||
+      source_type == xenos::PrimitiveType::kLineStrip) {
     if (!reset || reset_index == reset_index_host) {
       return ConversionResult::kConversionNotNeeded;
     }
-  } else if (source_type == PrimitiveType::kQuadList) {
+  } else if (source_type == xenos::PrimitiveType::kQuadList) {
     if (!cvars::d3d12_convert_quads_to_triangles) {
       return ConversionResult::kConversionNotNeeded;
     }
-  } else if (source_type != PrimitiveType::kTriangleFan &&
-             source_type != PrimitiveType::kLineLoop) {
+  } else if (source_type != xenos::PrimitiveType::kTriangleFan &&
+             source_type != xenos::PrimitiveType::kLineLoop) {
     return ConversionResult::kConversionNotNeeded;
   }
 
@@ -227,10 +225,10 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
 
   // Exit early for clearly empty draws, without even reading the memory.
   uint32_t index_count_min;
-  if (source_type == PrimitiveType::kLineStrip ||
-      source_type == PrimitiveType::kLineLoop) {
+  if (source_type == xenos::PrimitiveType::kLineStrip ||
+      source_type == xenos::PrimitiveType::kLineLoop) {
     index_count_min = 2;
-  } else if (source_type == PrimitiveType::kQuadList) {
+  } else if (source_type == xenos::PrimitiveType::kQuadList) {
     index_count_min = 4;
   } else {
     index_count_min = 3;
@@ -248,6 +246,7 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
 
   address &= index_32bit ? 0x1FFFFFFC : 0x1FFFFFFE;
   uint32_t index_size = index_32bit ? sizeof(uint32_t) : sizeof(uint16_t);
+  uint32_t index_buffer_size = index_size * index_count;
   uint32_t address_last = address + index_size * (index_count - 1);
 
   // Create the cache entry, currently only for the key.
@@ -292,7 +291,7 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
     const uint32_t* source_32;
     uintptr_t source_uintptr;
   };
-  source = memory_->TranslatePhysical(address);
+  source = memory_.TranslatePhysical(address);
 
   // Calculate the new index count, and also check if there's nothing to convert
   // in the buffer (for instance, if not using actually primitive reset).
@@ -302,14 +301,16 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
   // Optimization specific to primitive types - if reset index not found in the
   // source index buffer, can set this to false and use a faster way of copying.
   bool reset_actually_used = reset;
-  if (source_type == PrimitiveType::kTriangleFan) {
+  if (source_type == xenos::PrimitiveType::kTriangleFan) {
     // Triangle fans are not supported by Direct3D 12 at all.
     conversion_needed = true;
+    trace_writer_.WriteMemoryRead(address, index_buffer_size);
     if (reset) {
       uint32_t current_fan_index_count = 0;
       for (uint32_t i = 0; i < index_count; ++i) {
-        uint32_t index =
-            index_format == IndexFormat::kInt32 ? source_32[i] : source_16[i];
+        uint32_t index = index_format == xenos::IndexFormat::kInt32
+                             ? source_32[i]
+                             : source_16[i];
         if (index == reset_index) {
           current_fan_index_count = 0;
           continue;
@@ -321,12 +322,13 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
     } else {
       converted_index_count = 3 * (index_count - 2);
     }
-  } else if (source_type == PrimitiveType::kTriangleStrip ||
-             source_type == PrimitiveType::kLineStrip) {
+  } else if (source_type == xenos::PrimitiveType::kTriangleStrip ||
+             source_type == xenos::PrimitiveType::kLineStrip) {
     converted_index_count = index_count;
     // Check if the restart index is used at all in this buffer because reading
     // vertices from a default heap is faster than from an upload heap.
     conversion_needed = false;
+    trace_writer_.WriteMemoryRead(address, index_buffer_size);
 #if XE_ARCH_AMD64
     // Will use SIMD to copy 16-byte blocks using _mm_or_si128.
     simd = true;
@@ -340,7 +342,7 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
     check_source = source;
     uint32_t check_indices_remaining = index_count;
     alignas(16) uint64_t check_result[2];
-    if (index_format == IndexFormat::kInt32) {
+    if (index_format == xenos::IndexFormat::kInt32) {
       while (check_indices_remaining != 0 && (check_source_uintptr & 15)) {
         --check_indices_remaining;
         if (*(check_source_32++) == reset_index) {
@@ -394,7 +396,7 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
       }
     }
 #else
-    if (index_format == IndexFormat::kInt32) {
+    if (index_format == xenos::IndexFormat::kInt32) {
       for (uint32_t i = 0; i < index_count; ++i) {
         if (source_32[i] == reset_index) {
           conversion_needed = true;
@@ -410,14 +412,16 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
       }
     }
 #endif  // XE_ARCH_AMD64
-  } else if (source_type == PrimitiveType::kLineLoop) {
+  } else if (source_type == xenos::PrimitiveType::kLineLoop) {
     conversion_needed = true;
+    trace_writer_.WriteMemoryRead(address, index_buffer_size);
     if (reset) {
       reset_actually_used = false;
       uint32_t current_strip_index_count = 0;
       for (uint32_t i = 0; i < index_count; ++i) {
-        uint32_t index =
-            index_format == IndexFormat::kInt32 ? source_32[i] : source_16[i];
+        uint32_t index = index_format == xenos::IndexFormat::kInt32
+                             ? source_32[i]
+                             : source_16[i];
         if (index == reset_index) {
           reset_actually_used = true;
           // Loop strips with more than 2 vertices.
@@ -435,8 +439,9 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
     } else {
       converted_index_count = index_count + 1;
     }
-  } else if (source_type == PrimitiveType::kQuadList) {
+  } else if (source_type == xenos::PrimitiveType::kQuadList) {
     conversion_needed = true;
+    trace_writer_.WriteMemoryRead(address, index_buffer_size);
     converted_index_count = (index_count >> 2) * 6;
   }
   converted_indices.converted_index_count = converted_index_count;
@@ -461,13 +466,13 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
     return ConversionResult::kFailed;
   }
 
-  if (source_type == PrimitiveType::kTriangleFan) {
+  if (source_type == xenos::PrimitiveType::kTriangleFan) {
     // https://docs.microsoft.com/en-us/windows/desktop/direct3d9/triangle-fans
     // Ordered as (v1, v2, v0), (v2, v3, v0).
     if (reset) {
       uint32_t current_fan_index_count = 0;
       uint32_t current_fan_first_index = 0;
-      if (index_format == IndexFormat::kInt32) {
+      if (index_format == xenos::IndexFormat::kInt32) {
         uint32_t* target_32 = reinterpret_cast<uint32_t*>(target);
         for (uint32_t i = 0; i < index_count; ++i) {
           uint32_t index = source_32[i];
@@ -503,7 +508,7 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
         }
       }
     } else {
-      if (index_format == IndexFormat::kInt32) {
+      if (index_format == xenos::IndexFormat::kInt32) {
         uint32_t* target_32 = reinterpret_cast<uint32_t*>(target);
         for (uint32_t i = 2; i < index_count; ++i) {
           *(target_32++) = source_32[i - 1];
@@ -519,8 +524,8 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
         }
       }
     }
-  } else if (source_type == PrimitiveType::kTriangleStrip ||
-             source_type == PrimitiveType::kLineStrip) {
+  } else if (source_type == xenos::PrimitiveType::kTriangleStrip ||
+             source_type == xenos::PrimitiveType::kLineStrip) {
 #if XE_ARCH_AMD64
     // Replace the reset index with the maximum representable value - vector OR
     // gives 0 or 0xFFFF/0xFFFFFFFF, which is exactly what is needed.
@@ -539,7 +544,7 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
     target_aligned_uintptr =
         reinterpret_cast<uintptr_t>(target) & ~(uintptr_t(15));
     uint32_t vector_count = (address_last >> 4) - (address >> 4) + 1;
-    if (index_format == IndexFormat::kInt32) {
+    if (index_format == xenos::IndexFormat::kInt32) {
       __m128i reset_index_vector = _mm_set1_epi32(reset_index);
       for (uint32_t i = 0; i < vector_count; ++i) {
         __m128i indices_vector = _mm_load_si128(source_aligned_128++);
@@ -559,7 +564,7 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
       }
     }
 #else
-    if (index_format == IndexFormat::kInt32) {
+    if (index_format == xenos::IndexFormat::kInt32) {
       for (uint32_t i = 0; i < index_count; ++i) {
         uint32_t index = source_32[i];
         reinterpret_cast<uint32_t*>(target)[i] =
@@ -573,11 +578,11 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
       }
     }
 #endif  // XE_ARCH_AMD64
-  } else if (source_type == PrimitiveType::kLineLoop) {
+  } else if (source_type == xenos::PrimitiveType::kLineLoop) {
     if (reset_actually_used) {
       uint32_t current_strip_index_count = 0;
       uint32_t current_strip_first_index = 0;
-      if (index_format == IndexFormat::kInt32) {
+      if (index_format == xenos::IndexFormat::kInt32) {
         uint32_t* target_32 = reinterpret_cast<uint32_t*>(target);
         for (uint32_t i = 0; i < index_count; ++i) {
           uint32_t index = source_32[i];
@@ -625,16 +630,16 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
     } else {
       std::memcpy(target, source, index_count * index_size);
       if (converted_index_count > index_count) {
-        if (index_format == IndexFormat::kInt32) {
+        if (index_format == xenos::IndexFormat::kInt32) {
           reinterpret_cast<uint32_t*>(target)[index_count] = source_32[0];
         } else {
           reinterpret_cast<uint16_t*>(target)[index_count] = source_16[0];
         }
       }
     }
-  } else if (source_type == PrimitiveType::kQuadList) {
+  } else if (source_type == xenos::PrimitiveType::kQuadList) {
     uint32_t quad_count = index_count >> 4;
-    if (index_format == IndexFormat::kInt32) {
+    if (index_format == xenos::IndexFormat::kInt32) {
       uint32_t* target_32 = reinterpret_cast<uint32_t*>(target);
       for (uint32_t i = 0; i < quad_count; ++i) {
         uint32_t quad_index = i << 2;
@@ -670,13 +675,14 @@ PrimitiveConverter::ConversionResult PrimitiveConverter::ConvertPrimitives(
 }
 
 void* PrimitiveConverter::AllocateIndices(
-    IndexFormat format, uint32_t count, uint32_t simd_offset,
+    xenos::IndexFormat format, uint32_t count, uint32_t simd_offset,
     D3D12_GPU_VIRTUAL_ADDRESS& gpu_address_out) {
   if (count == 0) {
     return nullptr;
   }
-  uint32_t size = count * (format == IndexFormat::kInt32 ? sizeof(uint32_t)
-                                                         : sizeof(uint16_t));
+  uint32_t size =
+      count * (format == xenos::IndexFormat::kInt32 ? sizeof(uint32_t)
+                                                    : sizeof(uint16_t));
   // 16-align all index data because SIMD is used to replace the reset index
   // (without that, 4-alignment would be required anyway to mix 16-bit and
   // 32-bit indices in one buffer page).
@@ -689,17 +695,18 @@ void* PrimitiveConverter::AllocateIndices(
   }
   D3D12_GPU_VIRTUAL_ADDRESS gpu_address;
   uint8_t* mapping =
-      buffer_pool_->RequestFull(size, nullptr, nullptr, &gpu_address);
+      buffer_pool_->Request(command_processor_.GetCurrentFrame(), size, nullptr,
+                            nullptr, &gpu_address);
   if (mapping == nullptr) {
-    XELOGE("Failed to allocate space for %u converted %u-bit vertex indices",
-           count, format == IndexFormat::kInt32 ? 32 : 16);
+    XELOGE("Failed to allocate space for {} converted {}-bit vertex indices",
+           count, format == xenos::IndexFormat::kInt32 ? 32 : 16);
     return nullptr;
   }
   gpu_address_out = gpu_address + simd_offset;
   return mapping + simd_offset;
 }
 
-std::pair<uint32_t, uint32_t> PrimitiveConverter::MemoryWriteCallback(
+std::pair<uint32_t, uint32_t> PrimitiveConverter::MemoryInvalidationCallback(
     uint32_t physical_address_start, uint32_t length, bool exact_range) {
   // 1 bit = (512 / 64) MB = 8 MB. Invalidate a region of this size.
   uint32_t bit_index_first = physical_address_start >> 23;
@@ -712,31 +719,38 @@ std::pair<uint32_t, uint32_t> PrimitiveConverter::MemoryWriteCallback(
   return std::make_pair<uint32_t, uint32_t>(0, UINT32_MAX);
 }
 
-std::pair<uint32_t, uint32_t> PrimitiveConverter::MemoryWriteCallbackThunk(
+std::pair<uint32_t, uint32_t>
+PrimitiveConverter::MemoryInvalidationCallbackThunk(
     void* context_ptr, uint32_t physical_address_start, uint32_t length,
     bool exact_range) {
   return reinterpret_cast<PrimitiveConverter*>(context_ptr)
-      ->MemoryWriteCallback(physical_address_start, length, exact_range);
+      ->MemoryInvalidationCallback(physical_address_start, length, exact_range);
 }
 
 D3D12_GPU_VIRTUAL_ADDRESS PrimitiveConverter::GetStaticIndexBuffer(
-    PrimitiveType source_type, uint32_t index_count,
+    xenos::PrimitiveType source_type, uint32_t index_count,
     uint32_t& index_count_out) const {
   if (index_count > kMaxNonIndexedVertices) {
     assert_always();
     return D3D12_GPU_VIRTUAL_ADDRESS(0);
   }
-  if (source_type == PrimitiveType::kTriangleFan) {
+  if (source_type == xenos::PrimitiveType::kTriangleFan) {
     index_count_out = (std::max(index_count, uint32_t(2)) - 2) * 3;
     return static_ib_gpu_address_ +
            kStaticIBTriangleFanOffset * sizeof(uint16_t);
   }
-  if (source_type == PrimitiveType::kQuadList &&
+  if (source_type == xenos::PrimitiveType::kQuadList &&
       cvars::d3d12_convert_quads_to_triangles) {
     index_count_out = (index_count >> 2) * 6;
     return static_ib_gpu_address_ + kStaticIBQuadOffset * sizeof(uint16_t);
   }
   return D3D12_GPU_VIRTUAL_ADDRESS(0);
+}
+
+void PrimitiveConverter::InitializeTrace() {
+  // WriteMemoryRead must not be skipped.
+  converted_indices_cache_.clear();
+  memory_regions_used_ = 0;
 }
 
 }  // namespace d3d12

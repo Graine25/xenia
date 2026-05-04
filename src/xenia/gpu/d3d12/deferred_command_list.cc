@@ -17,10 +17,8 @@ namespace xe {
 namespace gpu {
 namespace d3d12 {
 
-constexpr size_t DeferredCommandList::kAlignment;
-
 DeferredCommandList::DeferredCommandList(
-    D3D12CommandProcessor* command_processor, size_t initial_size)
+    D3D12CommandProcessor& command_processor, size_t initial_size)
     : command_processor_(command_processor) {
   command_stream_.reserve(initial_size);
 }
@@ -38,6 +36,15 @@ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
     stream += header_size;
     stream_remaining -= header_size;
     switch (Command(header[0])) {
+      case Command::kD3DClearUnorderedAccessViewUint: {
+        auto& args =
+            *reinterpret_cast<const ClearUnorderedAccessViewHeader*>(stream);
+        command_list->ClearUnorderedAccessViewUint(
+            args.view_gpu_handle_in_current_heap, args.view_cpu_handle,
+            args.resource, args.values_uint, args.num_rects,
+            args.num_rects ? reinterpret_cast<const D3D12_RECT*>(&args + 1)
+                           : nullptr);
+      } break;
       case Command::kD3DCopyBufferRegion: {
         auto& args =
             *reinterpret_cast<const D3DCopyBufferRegionArguments*>(stream);
@@ -52,6 +59,12 @@ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
       case Command::kCopyTexture: {
         auto& args = *reinterpret_cast<const CopyTextureArguments*>(stream);
         command_list->CopyTextureRegion(&args.dst, 0, 0, 0, &args.src, nullptr);
+      } break;
+      case Command::kCopyTextureRegion: {
+        auto& args =
+            *reinterpret_cast<const CopyTextureRegionArguments*>(stream);
+        command_list->CopyTextureRegion(&args.dst, args.dst_x, args.dst_y,
+                                        args.dst_z, &args.src, &args.src_box);
       } break;
       case Command::kD3DDispatch: {
         if (current_pipeline_state != nullptr) {
@@ -191,8 +204,9 @@ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
         }
       } break;
       case Command::kSetPipelineStateHandle: {
-        current_pipeline_state = command_processor_->GetPipelineStateByHandle(
-            *reinterpret_cast<void* const*>(stream));
+        current_pipeline_state =
+            command_processor_.GetD3D12PipelineStateByHandle(
+                *reinterpret_cast<void* const*>(stream));
         if (current_pipeline_state) {
           command_list->SetPipelineState(current_pipeline_state);
         }

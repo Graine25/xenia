@@ -15,7 +15,7 @@
 #include <vector>
 
 #include "xenia/base/math.h"
-#include "xenia/ui/d3d12/command_list.h"
+#include "xenia/ui/d3d12/d3d12_api.h"
 
 namespace xe {
 namespace gpu {
@@ -25,12 +25,30 @@ class D3D12CommandProcessor;
 
 class DeferredCommandList {
  public:
-  DeferredCommandList(D3D12CommandProcessor* command_processor,
+  DeferredCommandList(D3D12CommandProcessor& command_processor,
                       size_t initial_size = 256 * 1024);
 
   void Reset();
   void Execute(ID3D12GraphicsCommandList* command_list,
                ID3D12GraphicsCommandList1* command_list_1);
+
+  inline void D3DClearUnorderedAccessViewUint(
+      D3D12_GPU_DESCRIPTOR_HANDLE view_gpu_handle_in_current_heap,
+      D3D12_CPU_DESCRIPTOR_HANDLE view_cpu_handle, ID3D12Resource* resource,
+      const UINT values[4], UINT num_rects, const D3D12_RECT* rects) {
+    auto args = reinterpret_cast<ClearUnorderedAccessViewHeader*>(
+        WriteCommand(Command::kD3DClearUnorderedAccessViewUint,
+                     sizeof(ClearUnorderedAccessViewHeader) +
+                         num_rects * sizeof(D3D12_RECT)));
+    args->view_gpu_handle_in_current_heap = view_gpu_handle_in_current_heap;
+    args->view_cpu_handle = view_cpu_handle;
+    args->resource = resource;
+    std::memcpy(args->values_uint, values, 4 * sizeof(UINT));
+    args->num_rects = num_rects;
+    if (num_rects != 0) {
+      std::memcpy(args + 1, rects, num_rects * sizeof(D3D12_RECT));
+    }
+  }
 
   inline void D3DCopyBufferRegion(ID3D12Resource* dst_buffer, UINT64 dst_offset,
                                   ID3D12Resource* src_buffer, UINT64 src_offset,
@@ -58,6 +76,20 @@ class DeferredCommandList {
         WriteCommand(Command::kCopyTexture, sizeof(CopyTextureArguments)));
     std::memcpy(&args.dst, &dst, sizeof(D3D12_TEXTURE_COPY_LOCATION));
     std::memcpy(&args.src, &src, sizeof(D3D12_TEXTURE_COPY_LOCATION));
+  }
+
+  inline void CopyTextureRegion(const D3D12_TEXTURE_COPY_LOCATION& dst,
+                                UINT dst_x, UINT dst_y, UINT dst_z,
+                                const D3D12_TEXTURE_COPY_LOCATION& src,
+                                const D3D12_BOX& src_box) {
+    auto& args = *reinterpret_cast<CopyTextureRegionArguments*>(WriteCommand(
+        Command::kCopyTextureRegion, sizeof(CopyTextureRegionArguments)));
+    std::memcpy(&args.dst, &dst, sizeof(D3D12_TEXTURE_COPY_LOCATION));
+    args.dst_x = dst_x;
+    args.dst_y = dst_y;
+    args.dst_z = dst_z;
+    std::memcpy(&args.src, &src, sizeof(D3D12_TEXTURE_COPY_LOCATION));
+    args.src_box = src_box;
   }
 
   inline void D3DDispatch(UINT thread_group_count_x, UINT thread_group_count_y,
@@ -303,9 +335,11 @@ class DeferredCommandList {
   static constexpr size_t kAlignment = std::max(sizeof(void*), sizeof(UINT64));
 
   enum class Command : uint32_t {
+    kD3DClearUnorderedAccessViewUint,
     kD3DCopyBufferRegion,
     kD3DCopyResource,
     kCopyTexture,
+    kCopyTextureRegion,
     kD3DDispatch,
     kD3DDrawIndexedInstanced,
     kD3DDrawInstanced,
@@ -331,6 +365,17 @@ class DeferredCommandList {
     kD3DSetSamplePositions,
   };
 
+  struct ClearUnorderedAccessViewHeader {
+    D3D12_GPU_DESCRIPTOR_HANDLE view_gpu_handle_in_current_heap;
+    D3D12_CPU_DESCRIPTOR_HANDLE view_cpu_handle;
+    ID3D12Resource* resource;
+    union {
+      float values_float[4];
+      UINT values_uint[4];
+    };
+    UINT num_rects;
+  };
+
   struct D3DCopyBufferRegionArguments {
     ID3D12Resource* dst_buffer;
     UINT64 dst_offset;
@@ -347,6 +392,15 @@ class DeferredCommandList {
   struct CopyTextureArguments {
     D3D12_TEXTURE_COPY_LOCATION dst;
     D3D12_TEXTURE_COPY_LOCATION src;
+  };
+
+  struct CopyTextureRegionArguments {
+    D3D12_TEXTURE_COPY_LOCATION dst;
+    UINT dst_x;
+    UINT dst_y;
+    UINT dst_z;
+    D3D12_TEXTURE_COPY_LOCATION src;
+    D3D12_BOX src_box;
   };
 
   struct D3DDispatchArguments {
@@ -408,7 +462,7 @@ class DeferredCommandList {
 
   void* WriteCommand(Command command, size_t arguments_size);
 
-  D3D12CommandProcessor* command_processor_;
+  D3D12CommandProcessor& command_processor_;
 
   std::vector<uint8_t> command_stream_;
 };

@@ -15,6 +15,7 @@
 #include <unordered_map>
 
 #include "xenia/gpu/register_file.h"
+#include "xenia/gpu/trace_writer.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/memory.h"
 #include "xenia/ui/d3d12/d3d12_context.h"
@@ -36,19 +37,22 @@ class D3D12CommandProcessor;
 //   alternative to the geometry shader).
 class PrimitiveConverter {
  public:
-  PrimitiveConverter(D3D12CommandProcessor* command_processor,
-                     RegisterFile* register_file, Memory* memory);
+  PrimitiveConverter(D3D12CommandProcessor& command_processor,
+                     const RegisterFile& register_file, Memory& memory,
+                     TraceWriter& trace_writer);
   ~PrimitiveConverter();
 
   bool Initialize();
   void Shutdown();
   void ClearCache();
 
+  void CompletedSubmissionUpdated();
+  void BeginSubmission();
   void BeginFrame();
-  void EndFrame();
 
   // Returns the primitive type that the original type will be converted to.
-  static PrimitiveType GetReplacementPrimitiveType(PrimitiveType type);
+  static xenos::PrimitiveType GetReplacementPrimitiveType(
+      xenos::PrimitiveType type);
 
   enum class ConversionResult {
     // Converted to a transient buffer.
@@ -66,10 +70,10 @@ class PrimitiveConverter {
   // buffer will be in the GENERIC_READ state (it's in an upload heap). Only
   // writing to the outputs if returning kConverted. The restart index will be
   // handled internally from the register values.
-  ConversionResult ConvertPrimitives(PrimitiveType source_type,
+  ConversionResult ConvertPrimitives(xenos::PrimitiveType source_type,
                                      uint32_t address, uint32_t index_count,
-                                     IndexFormat index_format,
-                                     Endian index_endianness,
+                                     xenos::IndexFormat index_format,
+                                     xenos::Endian index_endianness,
                                      D3D12_GPU_VIRTUAL_ADDRESS& gpu_address_out,
                                      uint32_t& index_count_out);
 
@@ -77,27 +81,31 @@ class PrimitiveConverter {
   // primitives in INDEX_BUFFER state, for non-indexed drawing. Returns 0 if
   // conversion is not available (can draw natively).
   D3D12_GPU_VIRTUAL_ADDRESS GetStaticIndexBuffer(
-      PrimitiveType source_type, uint32_t index_count,
+      xenos::PrimitiveType source_type, uint32_t index_count,
       uint32_t& index_count_out) const;
+
+  // Callback for invalidating buffers mid-frame.
+  std::pair<uint32_t, uint32_t> MemoryInvalidationCallback(
+      uint32_t physical_address_start, uint32_t length, bool exact_range);
+
+  void InitializeTrace();
 
  private:
   // simd_offset is source address & 15 - if SIMD is used, the source and the
   // target must have the same alignment within one register. 0 is optimal when
   // not using SIMD.
-  void* AllocateIndices(IndexFormat format, uint32_t count,
+  void* AllocateIndices(xenos::IndexFormat format, uint32_t count,
                         uint32_t simd_offset,
                         D3D12_GPU_VIRTUAL_ADDRESS& gpu_address_out);
 
-  // Callback for invalidating buffers mid-frame.
-  std::pair<uint32_t, uint32_t> MemoryWriteCallback(
-      uint32_t physical_address_start, uint32_t length, bool exact_range);
-  static std::pair<uint32_t, uint32_t> MemoryWriteCallbackThunk(
+  static std::pair<uint32_t, uint32_t> MemoryInvalidationCallbackThunk(
       void* context_ptr, uint32_t physical_address_start, uint32_t length,
       bool exact_range);
 
-  D3D12CommandProcessor* command_processor_;
-  RegisterFile* register_file_;
-  Memory* memory_;
+  D3D12CommandProcessor& command_processor_;
+  const RegisterFile& register_file_;
+  Memory& memory_;
+  TraceWriter& trace_writer_;
 
   std::unique_ptr<ui::d3d12::UploadBufferPool> buffer_pool_ = nullptr;
 
@@ -106,7 +114,7 @@ class PrimitiveConverter {
   // CPU-side, used only for uploading - destroyed once the copy commands have
   // been completed.
   ID3D12Resource* static_ib_upload_ = nullptr;
-  uint64_t static_ib_upload_frame_;
+  uint64_t static_ib_upload_submission_;
   // GPU-side - used for drawing.
   ID3D12Resource* static_ib_ = nullptr;
   D3D12_GPU_VIRTUAL_ADDRESS static_ib_gpu_address_;
@@ -127,11 +135,11 @@ class PrimitiveConverter {
   union ConvertedIndicesKey {
     uint64_t value;
     struct {
-      uint32_t address;               // 32
-      PrimitiveType source_type : 6;  // 38
-      IndexFormat format : 1;         // 39
-      uint32_t count : 16;            // 55
-      uint32_t reset : 1;             // 56
+      uint32_t address;                      // 32
+      xenos::PrimitiveType source_type : 6;  // 38
+      xenos::IndexFormat format : 1;         // 39
+      uint32_t count : 16;                   // 55
+      uint32_t reset : 1;                    // 56
     };
 
     // Clearing the unused bits.
@@ -170,7 +178,7 @@ class PrimitiveConverter {
   // the cache.
   uint64_t memory_regions_used_;
   std::atomic<uint64_t> memory_regions_invalidated_ = 0;
-  void* physical_write_watch_handle_ = nullptr;
+  void* memory_invalidation_callback_handle_ = nullptr;
   uint32_t system_page_size_;
 };
 

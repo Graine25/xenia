@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
+#include <vector>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
@@ -32,34 +34,20 @@ namespace xe {
 namespace gpu {
 namespace d3d12 {
 
-constexpr uint32_t SharedMemory::kBufferSizeLog2;
-constexpr uint32_t SharedMemory::kBufferSize;
-constexpr uint32_t SharedMemory::kAddressMask;
-constexpr uint32_t SharedMemory::kHeapSizeLog2;
-constexpr uint32_t SharedMemory::kHeapSize;
-constexpr uint32_t SharedMemory::kWatchBucketSizeLog2;
-constexpr uint32_t SharedMemory::kWatchBucketCount;
-constexpr uint32_t SharedMemory::kWatchRangePoolSize;
-constexpr uint32_t SharedMemory::kWatchNodePoolSize;
-
-SharedMemory::SharedMemory(D3D12CommandProcessor* command_processor,
-                           Memory* memory)
-    : command_processor_(command_processor), memory_(memory) {
+SharedMemory::SharedMemory(D3D12CommandProcessor& command_processor,
+                           Memory& memory, TraceWriter& trace_writer)
+    : command_processor_(command_processor),
+      memory_(memory),
+      trace_writer_(trace_writer) {
   page_size_log2_ = xe::log2_ceil(uint32_t(xe::memory::page_size()));
   page_count_ = kBufferSize >> page_size_log2_;
-  uint32_t page_bitmap_length = page_count_ >> 6;
-  assert_true(page_bitmap_length != 0);
-
-  // Two interleaved bit arrays.
-  valid_and_gpu_written_pages_.resize(page_bitmap_length << 1);
 }
 
 SharedMemory::~SharedMemory() { Shutdown(); }
 
 bool SharedMemory::Initialize() {
-  auto context = command_processor_->GetD3D12Context();
-  auto provider = context->GetD3D12Provider();
-  auto device = provider->GetDevice();
+  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
+  auto device = provider.GetDevice();
 
   D3D12_RESOURCE_DESC buffer_desc;
   ui::d3d12::util::FillBufferResourceDesc(
@@ -77,7 +65,7 @@ bool SharedMemory::Initialize() {
         "Direct3D 12 tiled resources are not used for shared memory "
         "emulation - video memory usage may increase significantly "
         "because a full 512 MB buffer will be created!");
-    if (provider->GetGraphicsAnalysis() != nullptr) {
+    if (provider.GetGraphicsAnalysis() != nullptr) {
       // As of October 8th, 2018, PIX doesn't support tiled buffers.
       // FIXME(Triang3l): Re-enable tiled resources with PIX once fixed.
       XELOGGPU(
@@ -93,10 +81,10 @@ bool SharedMemory::Initialize() {
     }
   }
   buffer_gpu_address_ = buffer_->GetGPUVirtualAddress();
+  buffer_uav_writes_commit_needed_ = false;
 
   std::memset(heaps_, 0, sizeof(heaps_));
   heap_count_ = 0;
-  heap_creation_failed_ = false;
 
   D3D12_DESCRIPTOR_HEAP_DESC buffer_descriptor_heap_desc;
   buffer_descriptor_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -114,35 +102,93 @@ bool SharedMemory::Initialize() {
   }
   buffer_descriptor_heap_start_ =
       buffer_descriptor_heap_->GetCPUDescriptorHandleForHeapStart();
-  ui::d3d12::util::CreateRawBufferSRV(
+  ui::d3d12::util::CreateBufferRawSRV(
       device,
-      provider->OffsetViewDescriptor(buffer_descriptor_heap_start_,
-                                     uint32_t(BufferDescriptorIndex::kRawSRV)),
+      provider.OffsetViewDescriptor(buffer_descriptor_heap_start_,
+                                    uint32_t(BufferDescriptorIndex::kRawSRV)),
       buffer_, kBufferSize);
-  ui::d3d12::util::CreateRawBufferUAV(
+  ui::d3d12::util::CreateBufferTypedSRV(
       device,
-      provider->OffsetViewDescriptor(buffer_descriptor_heap_start_,
-                                     uint32_t(BufferDescriptorIndex::kRawUAV)),
+      provider.OffsetViewDescriptor(
+          buffer_descriptor_heap_start_,
+          uint32_t(BufferDescriptorIndex::kR32UintSRV)),
+      buffer_, DXGI_FORMAT_R32_UINT, kBufferSize >> 2);
+  ui::d3d12::util::CreateBufferTypedSRV(
+      device,
+      provider.OffsetViewDescriptor(
+          buffer_descriptor_heap_start_,
+          uint32_t(BufferDescriptorIndex::kR32G32UintSRV)),
+      buffer_, DXGI_FORMAT_R32G32_UINT, kBufferSize >> 3);
+  ui::d3d12::util::CreateBufferTypedSRV(
+      device,
+      provider.OffsetViewDescriptor(
+          buffer_descriptor_heap_start_,
+          uint32_t(BufferDescriptorIndex::kR32G32B32A32UintSRV)),
+      buffer_, DXGI_FORMAT_R32G32B32A32_UINT, kBufferSize >> 4);
+  ui::d3d12::util::CreateBufferRawUAV(
+      device,
+      provider.OffsetViewDescriptor(buffer_descriptor_heap_start_,
+                                    uint32_t(BufferDescriptorIndex::kRawUAV)),
       buffer_, kBufferSize);
+  ui::d3d12::util::CreateBufferTypedUAV(
+      device,
+      provider.OffsetViewDescriptor(
+          buffer_descriptor_heap_start_,
+          uint32_t(BufferDescriptorIndex::kR32UintUAV)),
+      buffer_, DXGI_FORMAT_R32_UINT, kBufferSize >> 2);
+  ui::d3d12::util::CreateBufferTypedUAV(
+      device,
+      provider.OffsetViewDescriptor(
+          buffer_descriptor_heap_start_,
+          uint32_t(BufferDescriptorIndex::kR32G32UintUAV)),
+      buffer_, DXGI_FORMAT_R32G32_UINT, kBufferSize >> 3);
+  ui::d3d12::util::CreateBufferTypedUAV(
+      device,
+      provider.OffsetViewDescriptor(
+          buffer_descriptor_heap_start_,
+          uint32_t(BufferDescriptorIndex::kR32G32B32A32UintUAV)),
+      buffer_, DXGI_FORMAT_R32G32B32A32_UINT, kBufferSize >> 4);
 
-  std::memset(valid_and_gpu_written_pages_.data(), 0,
-              valid_and_gpu_written_pages_.size() * sizeof(uint64_t));
+  system_page_flags_.clear();
+  system_page_flags_.resize((page_count_ + 63) / 64);
 
-  upload_buffer_pool_ =
-      std::make_unique<ui::d3d12::UploadBufferPool>(context, 4 * 1024 * 1024);
+  upload_buffer_pool_ = std::make_unique<ui::d3d12::UploadBufferPool>(
+      device,
+      xe::align(uint32_t(4 * 1024 * 1024), uint32_t(1) << page_size_log2_));
 
-  physical_write_watch_handle_ =
-      memory_->RegisterPhysicalWriteWatch(MemoryWriteCallbackThunk, this);
+  memory_invalidation_callback_handle_ =
+      memory_.RegisterPhysicalMemoryInvalidationCallback(
+          MemoryInvalidationCallbackThunk, this);
+
+  ResetTraceGPUWrittenBuffer();
 
   return true;
 }
 
 void SharedMemory::Shutdown() {
-  // TODO(Triang3l): Do something in case any watches are still registered.
+  ResetTraceGPUWrittenBuffer();
 
-  if (physical_write_watch_handle_ != nullptr) {
-    memory_->UnregisterPhysicalWriteWatch(physical_write_watch_handle_);
-    physical_write_watch_handle_ = nullptr;
+  FireWatches(0, (kBufferSize - 1) >> page_size_log2_, false);
+  assert_true(global_watches_.empty());
+  // No watches now, so no references to the pools accessible by guest threads -
+  // safe not to enter the global critical region.
+  watch_node_first_free_ = nullptr;
+  watch_node_current_pool_allocated_ = 0;
+  for (WatchNode* pool : watch_node_pools_) {
+    delete[] pool;
+  }
+  watch_node_pools_.clear();
+  watch_range_first_free_ = nullptr;
+  watch_range_current_pool_allocated_ = 0;
+  for (WatchRange* pool : watch_range_pools_) {
+    delete[] pool;
+  }
+  watch_range_pools_.clear();
+
+  if (memory_invalidation_callback_handle_ != nullptr) {
+    memory_.UnregisterPhysicalMemoryInvalidationCallback(
+        memory_invalidation_callback_handle_);
+    memory_invalidation_callback_handle_ = nullptr;
   }
 
   upload_buffer_pool_.reset();
@@ -161,12 +207,39 @@ void SharedMemory::Shutdown() {
   }
 }
 
-void SharedMemory::BeginFrame() {
-  upload_buffer_pool_->BeginFrame();
-  heap_creation_failed_ = false;
+void SharedMemory::ClearCache() {
+  upload_buffer_pool_->ClearCache();
+
+  // Keeping GPU-written data, so "invalidated by GPU".
+  FireWatches(0, (kBufferSize - 1) >> page_size_log2_, true);
+  // No watches now, so no references to the pools accessible by guest threads -
+  // safe not to enter the global critical region.
+  watch_node_first_free_ = nullptr;
+  watch_node_current_pool_allocated_ = 0;
+  for (WatchNode* pool : watch_node_pools_) {
+    delete[] pool;
+  }
+  watch_node_pools_.clear();
+  watch_range_first_free_ = nullptr;
+  watch_range_current_pool_allocated_ = 0;
+  for (WatchRange* pool : watch_range_pools_) {
+    delete[] pool;
+  }
+  watch_range_pools_.clear();
+
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    for (SystemPageFlagsBlock& block : system_page_flags_) {
+      block.valid = block.valid_and_gpu_written;
+    }
+  }
+
+  // TODO(Triang3l): Unmap and destroy heaps.
 }
 
-void SharedMemory::EndFrame() { upload_buffer_pool_->EndFrame(); }
+void SharedMemory::CompletedSubmissionUpdated() {
+  upload_buffer_pool_->Reclaim(command_processor_.GetCompletedSubmission());
+}
 
 SharedMemory::GlobalWatchHandle SharedMemory::RegisterGlobalWatch(
     GlobalWatchCallback callback, void* callback_context) {
@@ -198,10 +271,9 @@ void SharedMemory::UnregisterGlobalWatch(GlobalWatchHandle handle) {
 SharedMemory::WatchHandle SharedMemory::WatchMemoryRange(
     uint32_t start, uint32_t length, WatchCallback callback,
     void* callback_context, void* callback_data, uint64_t callback_argument) {
-  if (length == 0) {
+  if (length == 0 || start >= kBufferSize) {
     return nullptr;
   }
-  start &= kAddressMask;
   length = std::min(length, kBufferSize - start);
   uint32_t watch_page_first = start >> page_size_log2_;
   uint32_t watch_page_last = (start + length - 1) >> page_size_log2_;
@@ -273,14 +345,12 @@ void SharedMemory::UnwatchMemoryRange(WatchHandle handle) {
   UnlinkWatchRange(reinterpret_cast<WatchRange*>(handle));
 }
 
-bool SharedMemory::MakeTilesResident(uint32_t start, uint32_t length) {
+bool SharedMemory::EnsureTilesResident(uint32_t start, uint32_t length) {
   if (length == 0) {
     // Some texture is empty, for example - safe to draw in this case.
     return true;
   }
-  start &= kAddressMask;
-  if ((kBufferSize - start) < length) {
-    // Exceeds the physical address space.
+  if (start > kBufferSize || (kBufferSize - start) < length) {
     return false;
   }
 
@@ -294,21 +364,15 @@ bool SharedMemory::MakeTilesResident(uint32_t start, uint32_t length) {
     if (heaps_[i] != nullptr) {
       continue;
     }
-    if (heap_creation_failed_) {
-      // Don't try to create a heap for every vertex buffer or texture in the
-      // current frame anymore if have failed at least once.
-      return false;
-    }
-    auto provider = command_processor_->GetD3D12Context()->GetD3D12Provider();
-    auto device = provider->GetDevice();
-    auto direct_queue = provider->GetDirectQueue();
+    auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
+    auto device = provider.GetDevice();
+    auto direct_queue = provider.GetDirectQueue();
     D3D12_HEAP_DESC heap_desc = {};
     heap_desc.SizeInBytes = kHeapSize;
     heap_desc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
     heap_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
     if (FAILED(device->CreateHeap(&heap_desc, IID_PPV_ARGS(&heaps_[i])))) {
       XELOGE("Shared memory: Failed to create a tile heap");
-      heap_creation_failed_ = true;
       return false;
     }
     ++heap_count_;
@@ -328,8 +392,8 @@ bool SharedMemory::MakeTilesResident(uint32_t start, uint32_t length) {
     UINT range_tile_count = kHeapSize / D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES;
     // FIXME(Triang3l): This may cause issues if the emulator is shut down
     // mid-frame and the heaps are destroyed before tile mappings are updated
-    // (AwaitAllFramesCompletion won't catch this then). Defer this until the
-    // actual command list submission at the end of the frame.
+    // (awaiting the fence won't catch this then). Defer this until the actual
+    // command list submission at the end of the frame.
     direct_queue->UpdateTileMappings(
         buffer_, 1, &region_start_coordinates, &region_size, heaps_[i], 1,
         &range_flags, &heap_range_start_offset, &range_tile_count,
@@ -343,21 +407,19 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
     // Some texture is empty, for example - safe to draw in this case.
     return true;
   }
-  start &= kAddressMask;
-  if ((kBufferSize - start) < length) {
-    // Exceeds the physical address space.
+  if (start > kBufferSize || (kBufferSize - start) < length) {
     return false;
   }
   uint32_t last = start + length - 1;
 
-  auto command_list = command_processor_->GetDeferredCommandList();
+  auto& command_list = command_processor_.GetDeferredCommandList();
 
 #if FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // FINE_GRAINED_DRAW_SCOPES
 
   // Ensure all tile heaps are present.
-  if (!MakeTilesResident(start, length)) {
+  if (!EnsureTilesResident(start, length)) {
     return false;
   }
 
@@ -366,15 +428,18 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
   if (upload_ranges_.size() == 0) {
     return true;
   }
-  TransitionBuffer(D3D12_RESOURCE_STATE_COPY_DEST);
-  command_processor_->SubmitBarriers();
+  CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_DEST);
+  command_processor_.SubmitBarriers();
   for (auto upload_range : upload_ranges_) {
     uint32_t upload_range_start = upload_range.first;
     uint32_t upload_range_length = upload_range.second;
+    trace_writer_.WriteMemoryRead(upload_range_start << page_size_log2_,
+                                  upload_range_length << page_size_log2_);
     while (upload_range_length != 0) {
       ID3D12Resource* upload_buffer;
       uint32_t upload_buffer_offset, upload_buffer_size;
       uint8_t* upload_buffer_mapping = upload_buffer_pool_->RequestPartial(
+          command_processor_.GetCurrentSubmission(),
           upload_range_length << page_size_log2_, &upload_buffer,
           &upload_buffer_offset, &upload_buffer_size, nullptr);
       if (upload_buffer_mapping == nullptr) {
@@ -382,13 +447,13 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
         return false;
       }
       uint32_t upload_buffer_pages = upload_buffer_size >> page_size_log2_;
-      // No mutex holding here!
-      MakeRangeValid(upload_range_start, upload_buffer_pages, false);
+      MakeRangeValid(upload_range_start << page_size_log2_,
+                     upload_buffer_pages << page_size_log2_, false);
       std::memcpy(
           upload_buffer_mapping,
-          memory_->TranslatePhysical(upload_range_start << page_size_log2_),
+          memory_.TranslatePhysical(upload_range_start << page_size_log2_),
           upload_buffer_size);
-      command_list->D3DCopyBufferRegion(
+      command_list.D3DCopyBufferRegion(
           buffer_, upload_range_start << page_size_log2_, upload_buffer,
           upload_buffer_offset, upload_buffer_size);
       upload_range_start += upload_buffer_pages;
@@ -433,8 +498,7 @@ void SharedMemory::FireWatches(uint32_t page_first, uint32_t page_last,
 }
 
 void SharedMemory::RangeWrittenByGPU(uint32_t start, uint32_t length) {
-  start &= kAddressMask;
-  if (length == 0) {
+  if (length == 0 || start >= kBufferSize) {
     return;
   }
   length = std::min(length, kBufferSize - start);
@@ -448,29 +512,30 @@ void SharedMemory::RangeWrittenByGPU(uint32_t start, uint32_t length) {
 
   // Mark the range as valid (so pages are not reuploaded until modified by the
   // CPU) and watch it so the CPU can reuse it and this will be caught.
-  // No mutex holding here!
-  MakeRangeValid(page_first, page_last - page_first + 1, true);
+  MakeRangeValid(start, length, true);
 }
 
 bool SharedMemory::AreTiledResourcesUsed() const {
   if (!cvars::d3d12_tiled_shared_memory) {
     return false;
   }
-  auto provider = command_processor_->GetD3D12Context()->GetD3D12Provider();
+  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
   // As of October 8th, 2018, PIX doesn't support tiled buffers.
   // FIXME(Triang3l): Re-enable tiled resources with PIX once fixed.
-  return provider->GetTiledResourcesTier() >= 1 &&
-         provider->GetGraphicsAnalysis() == nullptr;
+  return provider.GetTiledResourcesTier() !=
+             D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED &&
+         provider.GetGraphicsAnalysis() == nullptr;
 }
 
-void SharedMemory::MakeRangeValid(uint32_t valid_page_first,
-                                  uint32_t valid_page_count,
+void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length,
                                   bool written_by_gpu) {
-  if (valid_page_first >= page_count_ || valid_page_count == 0) {
+  if (length == 0 || start >= kBufferSize) {
     return;
   }
-  valid_page_count = std::min(valid_page_count, page_count_ - valid_page_first);
-  uint32_t valid_page_last = valid_page_first + valid_page_count - 1;
+  length = std::min(length, kBufferSize - start);
+  uint32_t last = start + length - 1;
+  uint32_t valid_page_first = start >> page_size_log2_;
+  uint32_t valid_page_last = last >> page_size_log2_;
   uint32_t valid_block_first = valid_page_first >> 6;
   uint32_t valid_block_last = valid_page_last >> 6;
 
@@ -485,17 +550,22 @@ void SharedMemory::MakeRangeValid(uint32_t valid_page_first,
       if (i == valid_block_last && (valid_page_last & 63) != 63) {
         valid_bits &= (1ull << ((valid_page_last & 63) + 1)) - 1;
       }
-      valid_and_gpu_written_pages_[i << 1] |= valid_bits;
+      SystemPageFlagsBlock& block = system_page_flags_[i];
+      block.valid |= valid_bits;
       if (written_by_gpu) {
-        valid_and_gpu_written_pages_[(i << 1) + 1] |= valid_bits;
+        block.valid_and_gpu_written |= valid_bits;
       } else {
-        valid_and_gpu_written_pages_[(i << 1) + 1] &= ~valid_bits;
+        block.valid_and_gpu_written &= ~valid_bits;
       }
     }
   }
 
-  memory_->WatchPhysicalMemoryWrite(valid_page_first << page_size_log2_,
-                                    valid_page_count << page_size_log2_);
+  if (memory_invalidation_callback_handle_) {
+    memory_.EnablePhysicalMemoryAccessCallbacks(
+        valid_page_first << page_size_log2_,
+        (valid_page_last - valid_page_first + 1) << page_size_log2_, true,
+        false);
+  }
 }
 
 void SharedMemory::UnlinkWatchRange(WatchRange* range) {
@@ -535,7 +605,7 @@ void SharedMemory::GetRangesToUpload(uint32_t request_page_first,
 
   uint32_t range_start = UINT32_MAX;
   for (uint32_t i = request_block_first; i <= request_block_last; ++i) {
-    uint64_t block_valid = valid_and_gpu_written_pages_[i << 1];
+    uint64_t block_valid = system_page_flags_[i].valid;
     // Consider pages in the block outside the requested range valid.
     if (i == request_block_first) {
       block_valid |= (1ull << (request_page_first & 63)) - 1;
@@ -577,17 +647,23 @@ void SharedMemory::GetRangesToUpload(uint32_t request_page_first,
   }
 }
 
-std::pair<uint32_t, uint32_t> SharedMemory::MemoryWriteCallbackThunk(
+std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallbackThunk(
     void* context_ptr, uint32_t physical_address_start, uint32_t length,
     bool exact_range) {
   return reinterpret_cast<SharedMemory*>(context_ptr)
-      ->MemoryWriteCallback(physical_address_start, length, exact_range);
+      ->MemoryInvalidationCallback(physical_address_start, length, exact_range);
 }
 
-std::pair<uint32_t, uint32_t> SharedMemory::MemoryWriteCallback(
+std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     uint32_t physical_address_start, uint32_t length, bool exact_range) {
+  if (length == 0 || physical_address_start >= kBufferSize) {
+    return std::make_pair(uint32_t(0), UINT32_MAX);
+  }
+  length = std::min(length, kBufferSize - physical_address_start);
+  uint32_t physical_address_last = physical_address_start + (length - 1);
+
   uint32_t page_first = physical_address_start >> page_size_log2_;
-  uint32_t page_last = (physical_address_start + length - 1) >> page_size_log2_;
+  uint32_t page_last = physical_address_last >> page_size_log2_;
   assert_true(page_first < page_count_ && page_last < page_count_);
   uint32_t block_first = page_first >> 6;
   uint32_t block_last = page_last >> 6;
@@ -604,14 +680,14 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryWriteCallback(
     // frame, but with 256 KB it's 0.7 ms.
     if (page_first & 63) {
       uint64_t gpu_written_start =
-          valid_and_gpu_written_pages_[(block_first << 1) + 1];
+          system_page_flags_[block_first].valid_and_gpu_written;
       gpu_written_start &= (1ull << (page_first & 63)) - 1;
       page_first =
           (page_first & ~uint32_t(63)) + (64 - xe::lzcnt(gpu_written_start));
     }
     if ((page_last & 63) != 63) {
       uint64_t gpu_written_end =
-          valid_and_gpu_written_pages_[(block_last << 1) + 1];
+          system_page_flags_[block_last].valid_and_gpu_written;
       gpu_written_end &= ~((1ull << ((page_last & 63) + 1)) - 1);
       page_last = (page_last & ~uint32_t(63)) +
                   (std::max(xe::tzcnt(gpu_written_end), uint8_t(1)) - 1);
@@ -626,8 +702,9 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryWriteCallback(
     if (i == block_last && (page_last & 63) != 63) {
       invalidate_bits &= (1ull << ((page_last & 63) + 1)) - 1;
     }
-    valid_and_gpu_written_pages_[i << 1] &= ~invalidate_bits;
-    valid_and_gpu_written_pages_[(i << 1) + 1] &= ~invalidate_bits;
+    SystemPageFlagsBlock& block = system_page_flags_[i];
+    block.valid &= ~invalidate_bits;
+    block.valid_and_gpu_written &= ~invalidate_bits;
   }
 
   FireWatches(page_first, page_last, false);
@@ -636,29 +713,244 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryWriteCallback(
                         (page_last - page_first + 1) << page_size_log2_);
 }
 
-void SharedMemory::TransitionBuffer(D3D12_RESOURCE_STATES new_state) {
-  command_processor_->PushTransitionBarrier(buffer_, buffer_state_, new_state);
+void SharedMemory::CommitUAVWritesAndTransitionBuffer(
+    D3D12_RESOURCE_STATES new_state) {
+  if (buffer_state_ == new_state) {
+    if (new_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS &&
+        buffer_uav_writes_commit_needed_) {
+      command_processor_.PushUAVBarrier(buffer_);
+      buffer_uav_writes_commit_needed_ = false;
+    }
+    return;
+  }
+  command_processor_.PushTransitionBarrier(buffer_, buffer_state_, new_state);
   buffer_state_ = new_state;
+  // "UAV -> anything" transition commits the writes implicitly.
+  buffer_uav_writes_commit_needed_ = false;
 }
 
 void SharedMemory::WriteRawSRVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle) {
-  auto provider = command_processor_->GetD3D12Context()->GetD3D12Provider();
-  auto device = provider->GetDevice();
+  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
+  auto device = provider.GetDevice();
   device->CopyDescriptorsSimple(
       1, handle,
-      provider->OffsetViewDescriptor(buffer_descriptor_heap_start_,
-                                     uint32_t(BufferDescriptorIndex::kRawSRV)),
+      provider.OffsetViewDescriptor(buffer_descriptor_heap_start_,
+                                    uint32_t(BufferDescriptorIndex::kRawSRV)),
       D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 }
 
 void SharedMemory::WriteRawUAVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle) {
-  auto provider = command_processor_->GetD3D12Context()->GetD3D12Provider();
-  auto device = provider->GetDevice();
+  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
+  auto device = provider.GetDevice();
   device->CopyDescriptorsSimple(
       1, handle,
-      provider->OffsetViewDescriptor(buffer_descriptor_heap_start_,
-                                     uint32_t(BufferDescriptorIndex::kRawUAV)),
+      provider.OffsetViewDescriptor(buffer_descriptor_heap_start_,
+                                    uint32_t(BufferDescriptorIndex::kRawUAV)),
       D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+}
+
+void SharedMemory::WriteUintPow2SRVDescriptor(
+    D3D12_CPU_DESCRIPTOR_HANDLE handle, uint32_t element_size_bytes_pow2) {
+  BufferDescriptorIndex descriptor_index;
+  switch (element_size_bytes_pow2) {
+    case 2:
+      descriptor_index = BufferDescriptorIndex::kR32UintSRV;
+      break;
+    case 3:
+      descriptor_index = BufferDescriptorIndex::kR32G32UintSRV;
+      break;
+    case 4:
+      descriptor_index = BufferDescriptorIndex::kR32G32B32A32UintSRV;
+      break;
+    default:
+      assert_unhandled_case(element_size_bytes_pow2);
+      return;
+  }
+  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
+  auto device = provider.GetDevice();
+  device->CopyDescriptorsSimple(
+      1, handle,
+      provider.OffsetViewDescriptor(buffer_descriptor_heap_start_,
+                                    uint32_t(descriptor_index)),
+      D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+}
+
+void SharedMemory::WriteUintPow2UAVDescriptor(
+    D3D12_CPU_DESCRIPTOR_HANDLE handle, uint32_t element_size_bytes_pow2) {
+  BufferDescriptorIndex descriptor_index;
+  switch (element_size_bytes_pow2) {
+    case 2:
+      descriptor_index = BufferDescriptorIndex::kR32UintUAV;
+      break;
+    case 3:
+      descriptor_index = BufferDescriptorIndex::kR32G32UintUAV;
+      break;
+    case 4:
+      descriptor_index = BufferDescriptorIndex::kR32G32B32A32UintUAV;
+      break;
+    default:
+      assert_unhandled_case(element_size_bytes_pow2);
+      return;
+  }
+  auto& provider = command_processor_.GetD3D12Context().GetD3D12Provider();
+  auto device = provider.GetDevice();
+  device->CopyDescriptorsSimple(
+      1, handle,
+      provider.OffsetViewDescriptor(buffer_descriptor_heap_start_,
+                                    uint32_t(descriptor_index)),
+      D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+}
+
+bool SharedMemory::InitializeTraceSubmitDownloads() {
+  // Invalidate the entire memory CPU->GPU memory copy so all the history
+  // doesn't have to be written into every frame trace, and collect the list of
+  // ranges with data modified on the GPU.
+  ResetTraceGPUWrittenBuffer();
+  uint32_t gpu_written_page_count = 0;
+
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    uint32_t fire_watches_range_start = UINT32_MAX;
+    uint32_t gpu_written_range_start = UINT32_MAX;
+    for (uint32_t i = 0; i < system_page_flags_.size(); ++i) {
+      SystemPageFlagsBlock& page_flags_block = system_page_flags_[i];
+      uint64_t previously_valid_block = page_flags_block.valid;
+      uint64_t gpu_written_block = page_flags_block.valid_and_gpu_written;
+      page_flags_block.valid = gpu_written_block;
+
+      // Fire watches on the invalidated pages.
+      uint64_t fire_watches_block = previously_valid_block & ~gpu_written_block;
+      uint64_t fire_watches_break_block = ~fire_watches_block;
+      while (true) {
+        uint32_t fire_watches_block_page;
+        if (!xe::bit_scan_forward(fire_watches_range_start == UINT32_MAX
+                                      ? fire_watches_block
+                                      : fire_watches_break_block,
+                                  &fire_watches_block_page)) {
+          break;
+        }
+        uint32_t fire_watches_page = (i << 6) + fire_watches_block_page;
+        if (fire_watches_range_start == UINT32_MAX) {
+          fire_watches_range_start = fire_watches_page;
+        } else {
+          FireWatches(fire_watches_range_start, fire_watches_page - 1, false);
+          fire_watches_range_start = UINT32_MAX;
+        }
+        uint64_t fire_watches_block_mask =
+            ~((1ull << fire_watches_block_page) - 1);
+        fire_watches_block &= fire_watches_block_mask;
+        fire_watches_break_block &= fire_watches_block_mask;
+      }
+
+      // Add to the GPU-written ranges.
+      uint64_t gpu_written_break_block = ~gpu_written_block;
+      while (true) {
+        uint32_t gpu_written_block_page;
+        if (!xe::bit_scan_forward(gpu_written_range_start == UINT32_MAX
+                                      ? gpu_written_block
+                                      : gpu_written_break_block,
+                                  &gpu_written_block_page)) {
+          break;
+        }
+        uint32_t gpu_written_page = (i << 6) + gpu_written_block_page;
+        if (gpu_written_range_start == UINT32_MAX) {
+          gpu_written_range_start = gpu_written_page;
+        } else {
+          uint32_t gpu_written_range_length =
+              gpu_written_page - gpu_written_range_start;
+          trace_gpu_written_ranges_.push_back(
+              std::make_pair(gpu_written_range_start << page_size_log2_,
+                             gpu_written_range_length << page_size_log2_));
+          gpu_written_page_count += gpu_written_range_length;
+          gpu_written_range_start = UINT32_MAX;
+        }
+        uint64_t gpu_written_block_mask =
+            ~((1ull << gpu_written_block_page) - 1);
+        gpu_written_block &= gpu_written_block_mask;
+        gpu_written_break_block &= gpu_written_block_mask;
+      }
+    }
+    if (fire_watches_range_start != UINT32_MAX) {
+      FireWatches(fire_watches_range_start, page_count_ - 1, false);
+    }
+    if (gpu_written_range_start != UINT32_MAX) {
+      uint32_t gpu_written_range_length = page_count_ - gpu_written_range_start;
+      trace_gpu_written_ranges_.push_back(
+          std::make_pair(gpu_written_range_start << page_size_log2_,
+                         gpu_written_range_length << page_size_log2_));
+      gpu_written_page_count += gpu_written_range_length;
+    }
+  }
+
+  // Request downloading of GPU-written memory.
+  if (!gpu_written_page_count) {
+    return false;
+  }
+  D3D12_RESOURCE_DESC gpu_written_buffer_desc;
+  ui::d3d12::util::FillBufferResourceDesc(
+      gpu_written_buffer_desc, gpu_written_page_count << page_size_log2_,
+      D3D12_RESOURCE_FLAG_NONE);
+  auto device =
+      command_processor_.GetD3D12Context().GetD3D12Provider().GetDevice();
+  if (FAILED(device->CreateCommittedResource(
+          &ui::d3d12::util::kHeapPropertiesReadback, D3D12_HEAP_FLAG_NONE,
+          &gpu_written_buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+          IID_PPV_ARGS(&trace_gpu_written_buffer_)))) {
+    XELOGE(
+        "Shared memory: Failed to create a {} KB GPU-written memory download "
+        "buffer for frame tracing",
+        gpu_written_page_count << page_size_log2_ >> 10);
+    ResetTraceGPUWrittenBuffer();
+    return false;
+  }
+  auto& command_list = command_processor_.GetDeferredCommandList();
+  UseAsCopySource();
+  command_processor_.SubmitBarriers();
+  uint32_t gpu_written_buffer_offset = 0;
+  for (auto& gpu_written_submit_range : trace_gpu_written_ranges_) {
+    // For cases like resolution scale, when the data may not be actually
+    // written, just marked as valid.
+    if (!EnsureTilesResident(gpu_written_submit_range.first,
+                             gpu_written_submit_range.second)) {
+      gpu_written_submit_range.second = 0;
+      continue;
+    }
+    command_list.D3DCopyBufferRegion(
+        trace_gpu_written_buffer_, gpu_written_buffer_offset, buffer_,
+        gpu_written_submit_range.first, gpu_written_submit_range.second);
+    gpu_written_buffer_offset += gpu_written_submit_range.second;
+  }
+  return true;
+}
+
+void SharedMemory::InitializeTraceCompleteDownloads() {
+  if (!trace_gpu_written_buffer_) {
+    return;
+  }
+  void* download_mapping;
+  if (SUCCEEDED(
+          trace_gpu_written_buffer_->Map(0, nullptr, &download_mapping))) {
+    uint32_t gpu_written_buffer_offset = 0;
+    for (auto gpu_written_submit_range : trace_gpu_written_ranges_) {
+      trace_writer_.WriteMemoryRead(
+          gpu_written_submit_range.first, gpu_written_submit_range.second,
+          reinterpret_cast<const uint8_t*>(download_mapping) +
+              gpu_written_buffer_offset);
+    }
+    D3D12_RANGE download_write_range = {};
+    trace_gpu_written_buffer_->Unmap(0, &download_write_range);
+  } else {
+    XELOGE(
+        "Failed to map the GPU-written memory download buffer for frame "
+        "tracing");
+  }
+  ResetTraceGPUWrittenBuffer();
+}
+
+void SharedMemory::ResetTraceGPUWrittenBuffer() {
+  trace_gpu_written_ranges_.clear();
+  trace_gpu_written_ranges_.shrink_to_fit();
+  ui::d3d12::util::ReleaseAndNull(trace_gpu_written_buffer_);
 }
 
 }  // namespace d3d12

@@ -14,7 +14,6 @@
 
 #include "third_party/xxhash/xxhash.h"
 
-#include "xenia/gpu/glsl_shader_translator.h"
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/spirv_shader_translator.h"
 #include "xenia/gpu/vulkan/render_cache.h"
@@ -48,8 +47,9 @@ class PipelineCache {
   void Shutdown();
 
   // Loads a shader from the cache, possibly translating it.
-  VulkanShader* LoadShader(ShaderType shader_type, uint32_t guest_address,
-                           const uint32_t* host_address, uint32_t dword_count);
+  VulkanShader* LoadShader(xenos::ShaderType shader_type,
+                           uint32_t guest_address, const uint32_t* host_address,
+                           uint32_t dword_count);
 
   // Configures a pipeline using the current render state and the given render
   // pass. If a previously available pipeline is available it will be used,
@@ -60,7 +60,7 @@ class PipelineCache {
                                  const RenderState* render_state,
                                  VulkanShader* vertex_shader,
                                  VulkanShader* pixel_shader,
-                                 PrimitiveType primitive_type,
+                                 xenos::PrimitiveType primitive_type,
                                  VkPipeline* pipeline_out);
 
   // Sets required dynamic state on the command buffer.
@@ -79,14 +79,14 @@ class PipelineCache {
   // state.
   VkPipeline GetPipeline(const RenderState* render_state, uint64_t hash_key);
 
-  bool TranslateShader(VulkanShader* shader, xenos::xe_gpu_program_cntl_t cntl);
+  bool TranslateShader(VulkanShader* shader, reg::SQ_PROGRAM_CNTL cntl);
 
   void DumpShaderDisasmAMD(VkPipeline pipeline);
   void DumpShaderDisasmNV(const VkGraphicsPipelineCreateInfo& info);
 
   // Gets a geometry shader used to emulate the given primitive type.
   // Returns nullptr if the primitive doesn't need to be emulated.
-  VkShaderModule GetGeometryShader(PrimitiveType primitive_type,
+  VkShaderModule GetGeometryShader(xenos::PrimitiveType primitive_type,
                                    bool is_line_mode);
 
   RegisterFile* register_file_ = nullptr;
@@ -132,16 +132,16 @@ class PipelineCache {
  private:
   UpdateStatus UpdateState(VulkanShader* vertex_shader,
                            VulkanShader* pixel_shader,
-                           PrimitiveType primitive_type);
+                           xenos::PrimitiveType primitive_type);
 
   UpdateStatus UpdateRenderTargetState();
   UpdateStatus UpdateShaderStages(VulkanShader* vertex_shader,
                                   VulkanShader* pixel_shader,
-                                  PrimitiveType primitive_type);
+                                  xenos::PrimitiveType primitive_type);
   UpdateStatus UpdateVertexInputState(VulkanShader* vertex_shader);
-  UpdateStatus UpdateInputAssemblyState(PrimitiveType primitive_type);
+  UpdateStatus UpdateInputAssemblyState(xenos::PrimitiveType primitive_type);
   UpdateStatus UpdateViewportState();
-  UpdateStatus UpdateRasterizationState(PrimitiveType primitive_type);
+  UpdateStatus UpdateRasterizationState(xenos::PrimitiveType primitive_type);
   UpdateStatus UpdateMultisampleState();
   UpdateStatus UpdateDepthStencilState();
   UpdateStatus UpdateColorBlendState();
@@ -168,9 +168,9 @@ class PipelineCache {
   } update_render_targets_regs_;
 
   struct UpdateShaderStagesRegisters {
-    PrimitiveType primitive_type;
+    xenos::PrimitiveType primitive_type;
     uint32_t pa_su_sc_mode_cntl;
-    uint32_t sq_program_cntl;
+    reg::SQ_PROGRAM_CNTL sq_program_cntl;
     VulkanShader* vertex_shader;
     VulkanShader* pixel_shader;
 
@@ -192,7 +192,7 @@ class PipelineCache {
       update_vertex_input_state_attrib_descrs_[96];
 
   struct UpdateInputAssemblyStateRegisters {
-    PrimitiveType primitive_type;
+    xenos::PrimitiveType primitive_type;
     uint32_t pa_su_sc_mode_cntl;
     uint32_t multi_prim_ib_reset_index;
 
@@ -222,7 +222,7 @@ class PipelineCache {
   VkPipelineViewportStateCreateInfo update_viewport_state_info_;
 
   struct UpdateRasterizationStateRegisters {
-    PrimitiveType primitive_type;
+    xenos::PrimitiveType primitive_type;
     uint32_t pa_cl_clip_cntl;
     uint32_t pa_su_sc_mode_cntl;
     uint32_t pa_sc_screen_scissor_tl;
@@ -256,7 +256,6 @@ class PipelineCache {
   VkPipelineDepthStencilStateCreateInfo update_depth_stencil_state_info_;
 
   struct UpdateColorBlendStateRegisters {
-    uint32_t rb_colorcontrol;
     uint32_t rb_color_mask;
     uint32_t rb_blendcontrol[4];
     uint32_t rb_modecontrol;
@@ -290,13 +289,13 @@ class PipelineCache {
     float rb_blend_rgba[4];
     uint32_t rb_stencilrefmask;
 
-    uint32_t sq_program_cntl;
+    reg::SQ_PROGRAM_CNTL sq_program_cntl;
     uint32_t sq_context_misc;
     uint32_t rb_colorcontrol;
-    uint32_t rb_color_info;
-    uint32_t rb_color1_info;
-    uint32_t rb_color2_info;
-    uint32_t rb_color3_info;
+    reg::RB_COLOR_INFO rb_color_info;
+    reg::RB_COLOR_INFO rb_color1_info;
+    reg::RB_COLOR_INFO rb_color2_info;
+    reg::RB_COLOR_INFO rb_color3_info;
     float rb_alpha_ref;
     uint32_t pa_su_point_size;
 

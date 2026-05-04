@@ -2,16 +2,16 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2016 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
 #include "xenia/gpu/vulkan/texture_cache.h"
-#include "xenia/gpu/vulkan/texture_config.h"
 
 #include <algorithm>
 
+#include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
@@ -20,6 +20,7 @@
 #include "xenia/gpu/sampler_info.h"
 #include "xenia/gpu/texture_conversion.h"
 #include "xenia/gpu/texture_info.h"
+#include "xenia/gpu/vulkan/texture_config.h"
 #include "xenia/gpu/vulkan/vulkan_gpu_flags.h"
 #include "xenia/ui/vulkan/vulkan_mem_alloc.h"
 
@@ -37,7 +38,7 @@ using xe::ui::vulkan::CheckResult;
 constexpr uint32_t kMaxTextureSamplers = 32;
 constexpr VkDeviceSize kStagingBufferSize = 64 * 1024 * 1024;
 
-const char* get_dimension_name(Dimension dimension) {
+const char* get_dimension_name(xenos::DataDimension dimension) {
   static const char* names[] = {
       "1D",
       "2D",
@@ -87,8 +88,8 @@ VkResult TextureCache::Initialize() {
       limits.maxPerStageDescriptorSampledImages < kMaxTextureSamplers) {
     XELOGE(
         "Physical device is unable to support required number of sampled "
-        "images! Expect instability! (maxPerStageDescriptorSamplers=%d, "
-        "maxPerStageDescriptorSampledImages=%d)",
+        "images! Expect instability! (maxPerStageDescriptorSamplers={}, "
+        "maxPerStageDescriptorSampledImages={})",
         limits.maxPerStageDescriptorSamplers,
         limits.maxPerStageDescriptorSampledImages);
     // assert_always();
@@ -150,16 +151,18 @@ VkResult TextureCache::Initialize() {
 
   device_queue_ = device_->AcquireQueue(device_->queue_family_index());
 
-  physical_write_watch_handle_ =
-      memory_->RegisterPhysicalWriteWatch(MemoryWriteCallbackThunk, this);
+  memory_invalidation_callback_handle_ =
+      memory_->RegisterPhysicalMemoryInvalidationCallback(
+          MemoryInvalidationCallbackThunk, this);
 
   return VK_SUCCESS;
 }
 
 void TextureCache::Shutdown() {
-  if (physical_write_watch_handle_ != nullptr) {
-    memory_->UnregisterPhysicalWriteWatch(physical_write_watch_handle_);
-    physical_write_watch_handle_ = nullptr;
+  if (memory_invalidation_callback_handle_ != nullptr) {
+    memory_->UnregisterPhysicalMemoryInvalidationCallback(
+        memory_invalidation_callback_handle_);
+    memory_invalidation_callback_handle_ = nullptr;
   }
 
   if (device_queue_) {
@@ -187,7 +190,7 @@ TextureCache::Texture* TextureCache::AllocateTexture(
   VkFormat format = config.host_format;
   if (format == VK_FORMAT_UNDEFINED) {
     XELOGE(
-        "Texture Cache: Attempted to allocate texture format %s, which is "
+        "Texture Cache: Attempted to allocate texture format {}, which is "
         "defined as VK_FORMAT_UNDEFINED!",
         texture_info.format_info()->name);
     return nullptr;
@@ -200,8 +203,8 @@ TextureCache::Texture* TextureCache::AllocateTexture(
   image_info.flags = 0;
 
   switch (texture_info.dimension) {
-    case Dimension::k1D:
-    case Dimension::k2D:
+    case xenos::DataDimension::k1D:
+    case xenos::DataDimension::k2DOrStacked:
       if (!texture_info.is_stacked) {
         image_info.imageType = VK_IMAGE_TYPE_2D;
       } else {
@@ -209,10 +212,10 @@ TextureCache::Texture* TextureCache::AllocateTexture(
         image_info.flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
       }
       break;
-    case Dimension::k3D:
+    case xenos::DataDimension::k3D:
       image_info.imageType = VK_IMAGE_TYPE_3D;
       break;
-    case Dimension::kCube:
+    case xenos::DataDimension::kCube:
       image_info.imageType = VK_IMAGE_TYPE_2D;
       image_info.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
       is_cube = true;
@@ -232,16 +235,14 @@ TextureCache::Texture* TextureCache::AllocateTexture(
   if ((props.optimalTilingFeatures & required_flags) != required_flags) {
     // Texture needs conversion on upload to a native format.
     XELOGE(
-        "Texture Cache: Invalid usage flag specified on format %s (%s)\n\t"
-        "(requested: %s)",
+        "Texture Cache: Invalid usage flag specified on format {} ({})\n\t"
+        "(requested: {})",
         texture_info.format_info()->name, ui::vulkan::to_string(format),
-        ui::vulkan::to_flags_string(
-            static_cast<VkFormatFeatureFlagBits>(required_flags &
-                                                 ~props.optimalTilingFeatures))
-            .c_str());
+        ui::vulkan::to_flags_string(static_cast<VkFormatFeatureFlagBits>(
+            required_flags & ~props.optimalTilingFeatures)));
   }
 
-  if (texture_info.dimension != Dimension::kCube &&
+  if (texture_info.dimension != xenos::DataDimension::kCube &&
       props.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) {
     // Add color attachment usage if it's supported.
     image_info.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
@@ -411,7 +412,7 @@ void TextureCache::WatchTexture(Texture* texture) {
     texture->is_watched = true;
   }
 
-  memory_->WatchPhysicalMemoryWrite(address, size);
+  memory_->EnablePhysicalMemoryAccessCallbacks(address, size, true, false);
 }
 
 void TextureCache::TextureTouched(Texture* texture) {
@@ -428,7 +429,7 @@ void TextureCache::TextureTouched(Texture* texture) {
   texture->pending_invalidation = true;
 }
 
-std::pair<uint32_t, uint32_t> TextureCache::MemoryWriteCallback(
+std::pair<uint32_t, uint32_t> TextureCache::MemoryInvalidationCallback(
     uint32_t physical_address_start, uint32_t length, bool exact_range) {
   global_critical_region_.Acquire();
   if (watched_textures_.empty()) {
@@ -468,11 +469,11 @@ std::pair<uint32_t, uint32_t> TextureCache::MemoryWriteCallback(
   return std::make_pair(previous_end, next_start - previous_end);
 }
 
-std::pair<uint32_t, uint32_t> TextureCache::MemoryWriteCallbackThunk(
+std::pair<uint32_t, uint32_t> TextureCache::MemoryInvalidationCallbackThunk(
     void* context_ptr, uint32_t physical_address_start, uint32_t length,
     bool exact_range) {
   return reinterpret_cast<TextureCache*>(context_ptr)
-      ->MemoryWriteCallback(physical_address_start, length, exact_range);
+      ->MemoryInvalidationCallback(physical_address_start, length, exact_range);
 }
 
 TextureCache::Texture* TextureCache::DemandResolveTexture(
@@ -501,8 +502,8 @@ TextureCache::Texture* TextureCache::DemandResolveTexture(
   }
 
   VkFormatFeatureFlags required_flags = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-  if (texture_info.format == TextureFormat::k_24_8 ||
-      texture_info.format == TextureFormat::k_24_8_FLOAT) {
+  if (texture_info.format == xenos::TextureFormat::k_24_8 ||
+      texture_info.format == xenos::TextureFormat::k_24_8_FLOAT) {
     required_flags |= VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
   } else {
     required_flags |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
@@ -520,8 +521,8 @@ TextureCache::Texture* TextureCache::DemandResolveTexture(
   device_->DbgSetObjectName(
       reinterpret_cast<uint64_t>(texture->image),
       VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT,
-      xe::format_string(
-          "RT: 0x%.8X - 0x%.8X (%s, %s)", texture_info.memory.base_address,
+      fmt::format(
+          "RT: 0x{:08X} - 0x{:08X} ({}, {})", texture_info.memory.base_address,
           texture_info.memory.base_address + texture_info.memory.base_size,
           texture_info.format_info()->name,
           get_dimension_name(texture_info.dimension)));
@@ -603,8 +604,8 @@ TextureCache::Texture* TextureCache::Demand(const TextureInfo& texture_info,
   device_->DbgSetObjectName(
       reinterpret_cast<uint64_t>(texture->image),
       VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT,
-      xe::format_string(
-          "T: 0x%.8X - 0x%.8X (%s, %s)", texture_info.memory.base_address,
+      fmt::format(
+          "T: 0x{:08X} - 0x{:08X} ({}, {})", texture_info.memory.base_address,
           texture_info.memory.base_address + texture_info.memory.base_size,
           texture_info.format_info()->name,
           get_dimension_name(texture_info.dimension)));
@@ -638,18 +639,18 @@ TextureCache::TextureView* TextureCache::DemandView(Texture* texture,
 
   bool is_cube = false;
   switch (texture->texture_info.dimension) {
-    case Dimension::k1D:
-    case Dimension::k2D:
+    case xenos::DataDimension::k1D:
+    case xenos::DataDimension::k2DOrStacked:
       if (!texture->texture_info.is_stacked) {
         view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
       } else {
         view_info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
       }
       break;
-    case Dimension::k3D:
+    case xenos::DataDimension::k3D:
       view_info.viewType = VK_IMAGE_VIEW_TYPE_3D;
       break;
-    case Dimension::kCube:
+    case xenos::DataDimension::kCube:
       view_info.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
       is_cube = true;
       break;
@@ -738,14 +739,14 @@ TextureCache::Sampler* TextureCache::Demand(const SamplerInfo& sampler_info) {
   // Texture level filtering.
   VkSamplerMipmapMode mip_filter;
   switch (sampler_info.mip_filter) {
-    case TextureFilter::kBaseMap:
+    case xenos::TextureFilter::kBaseMap:
       // TODO(DrChat): ?
       mip_filter = VK_SAMPLER_MIPMAP_MODE_NEAREST;
       break;
-    case TextureFilter::kPoint:
+    case xenos::TextureFilter::kPoint:
       mip_filter = VK_SAMPLER_MIPMAP_MODE_NEAREST;
       break;
-    case TextureFilter::kLinear:
+    case xenos::TextureFilter::kLinear:
       mip_filter = VK_SAMPLER_MIPMAP_MODE_LINEAR;
       break;
     default:
@@ -755,10 +756,10 @@ TextureCache::Sampler* TextureCache::Demand(const SamplerInfo& sampler_info) {
 
   VkFilter min_filter;
   switch (sampler_info.min_filter) {
-    case TextureFilter::kPoint:
+    case xenos::TextureFilter::kPoint:
       min_filter = VK_FILTER_NEAREST;
       break;
-    case TextureFilter::kLinear:
+    case xenos::TextureFilter::kLinear:
       min_filter = VK_FILTER_LINEAR;
       break;
     default:
@@ -767,10 +768,10 @@ TextureCache::Sampler* TextureCache::Demand(const SamplerInfo& sampler_info) {
   }
   VkFilter mag_filter;
   switch (sampler_info.mag_filter) {
-    case TextureFilter::kPoint:
+    case xenos::TextureFilter::kPoint:
       mag_filter = VK_FILTER_NEAREST;
       break;
-    case TextureFilter::kLinear:
+    case xenos::TextureFilter::kLinear:
       mag_filter = VK_FILTER_LINEAR;
       break;
     default:
@@ -802,22 +803,22 @@ TextureCache::Sampler* TextureCache::Demand(const SamplerInfo& sampler_info) {
 
   float aniso = 0.f;
   switch (sampler_info.aniso_filter) {
-    case AnisoFilter::kDisabled:
+    case xenos::AnisoFilter::kDisabled:
       aniso = 1.0f;
       break;
-    case AnisoFilter::kMax_1_1:
+    case xenos::AnisoFilter::kMax_1_1:
       aniso = 1.0f;
       break;
-    case AnisoFilter::kMax_2_1:
+    case xenos::AnisoFilter::kMax_2_1:
       aniso = 2.0f;
       break;
-    case AnisoFilter::kMax_4_1:
+    case xenos::AnisoFilter::kMax_4_1:
       aniso = 4.0f;
       break;
-    case AnisoFilter::kMax_8_1:
+    case xenos::AnisoFilter::kMax_8_1:
       aniso = 8.0f;
       break;
-    case AnisoFilter::kMax_16_1:
+    case xenos::AnisoFilter::kMax_16_1:
       aniso = 16.0f;
       break;
     default:
@@ -826,7 +827,8 @@ TextureCache::Sampler* TextureCache::Demand(const SamplerInfo& sampler_info) {
   }
 
   sampler_create_info.anisotropyEnable =
-      sampler_info.aniso_filter != AnisoFilter::kDisabled ? VK_TRUE : VK_FALSE;
+      sampler_info.aniso_filter != xenos::AnisoFilter::kDisabled ? VK_TRUE
+                                                                 : VK_FALSE;
   sampler_create_info.maxAnisotropy = aniso;
 
   sampler_create_info.compareEnable = VK_FALSE;
@@ -852,11 +854,12 @@ TextureCache::Sampler* TextureCache::Demand(const SamplerInfo& sampler_info) {
   return sampler;
 }
 
-bool TextureFormatIsSimilar(TextureFormat left, TextureFormat right) {
-#define COMPARE_FORMAT(x, y)                                     \
-  if ((left == TextureFormat::x && right == TextureFormat::y) || \
-      (left == TextureFormat::y && right == TextureFormat::x)) { \
-    return true;                                                 \
+bool TextureFormatIsSimilar(xenos::TextureFormat left,
+                            xenos::TextureFormat right) {
+#define COMPARE_FORMAT(x, y)                                                   \
+  if ((left == xenos::TextureFormat::x && right == xenos::TextureFormat::y) || \
+      (left == xenos::TextureFormat::y && right == xenos::TextureFormat::x)) { \
+    return true;                                                               \
   }
 
   if (left == right) return true;
@@ -912,7 +915,7 @@ TextureCache::Texture* TextureCache::Lookup(const TextureInfo& texture_info) {
 TextureCache::Texture* TextureCache::LookupAddress(uint32_t guest_address,
                                                    uint32_t width,
                                                    uint32_t height,
-                                                   TextureFormat format,
+                                                   xenos::TextureFormat format,
                                                    VkOffset2D* out_offset) {
   for (auto it = textures_.begin(); it != textures_.end(); ++it) {
     const auto& texture_info = it->second->texture_info;
@@ -923,7 +926,7 @@ TextureCache::Texture* TextureCache::LookupAddress(uint32_t guest_address,
         out_offset) {
       auto offset_bytes = guest_address - texture_info.memory.base_address;
 
-      if (texture_info.dimension == Dimension::k2D) {
+      if (texture_info.dimension == xenos::DataDimension::k2DOrStacked) {
         out_offset->x = 0;
         out_offset->y = offset_bytes / texture_info.pitch;
         if (offset_bytes % texture_info.pitch != 0) {
@@ -935,7 +938,7 @@ TextureCache::Texture* TextureCache::LookupAddress(uint32_t guest_address,
     }
 
     if (texture_info.memory.base_address == guest_address &&
-        texture_info.dimension == Dimension::k2D &&
+        texture_info.dimension == xenos::DataDimension::k2DOrStacked &&
         texture_info.pitch == width && texture_info.height == height) {
       if (out_offset) {
         out_offset->x = 0;
@@ -965,7 +968,7 @@ void TextureCache::FlushPendingCommands(VkCommandBuffer command_buffer,
         vkQueueSubmit(device_queue_, 1, &submit_info, completion_fence);
     CheckResult(status, "vkQueueSubmit");
   } else {
-    std::lock_guard<std::mutex> queue_lock(device_->primary_queue_mutex());
+    std::lock_guard<std::mutex>(device_->primary_queue_mutex());
 
     auto status = vkQueueSubmit(device_->primary_queue(), 1, &submit_info,
                                 completion_fence);
@@ -999,7 +1002,7 @@ bool TextureCache::ConvertTexture(uint8_t* dest, VkBufferImageCopy* copy_region,
 
   void* host_address = memory_->TranslatePhysical(address);
 
-  auto is_cube = src.dimension == Dimension::kCube;
+  auto is_cube = src.dimension == xenos::DataDimension::kCube;
   auto src_extent = src.GetMipExtent(mip, true);
   auto dst_extent = GetMipExtent(src, mip);
 
@@ -1067,9 +1070,9 @@ bool TextureCache::UploadTexture(VkCommandBuffer command_buffer,
   size_t unpack_length = ComputeTextureStorage(src);
 
   XELOGGPU(
-      "Uploading texture @ 0x%.8X/0x%.8X (%ux%ux%u, format: %s, dim: %s, "
-      "levels: %u (%u-%u), stacked: %s, pitch: %u, tiled: %s, packed mips: %s, "
-      "unpack length: 0x%.8X)",
+      "Uploading texture @ 0x{:08X}/0x{:08X} ({}x{}x{}, format: {}, dim: {}, "
+      "levels: {} ({}-{}), stacked: {}, pitch: {}, tiled: {}, packed mips: {}, "
+      "unpack length: 0x{:X})",
       src.memory.base_address, src.memory.mip_address, src.width + 1,
       src.height + 1, src.depth + 1, src.format_info()->name,
       get_dimension_name(src.dimension), src.mip_levels(), src.mip_min_level,
@@ -1077,7 +1080,7 @@ bool TextureCache::UploadTexture(VkCommandBuffer command_buffer,
       src.is_tiled ? "yes" : "no", src.has_packed_mips ? "yes" : "no",
       unpack_length);
 
-  XELOGGPU("Extent: %ux%ux%u  %u,%u,%u", src.extent.pitch, src.extent.height,
+  XELOGGPU("Extent: {}x{}x{}  {},{},{}", src.extent.pitch, src.extent.height,
            src.extent.depth, src.extent.block_pitch_h, src.extent.block_height,
            src.extent.block_pitch_v);
 
@@ -1096,7 +1099,7 @@ bool TextureCache::UploadTexture(VkCommandBuffer command_buffer,
     if (!staging_buffer_.CanAcquire(unpack_length)) {
       // The staging buffer isn't big enough to hold this texture.
       XELOGE(
-          "TextureCache staging buffer is too small! (uploading 0x%.8X bytes)",
+          "TextureCache staging buffer is too small! (uploading 0x{:X} bytes)",
           unpack_length);
       assert_always();
       return false;
@@ -1107,7 +1110,7 @@ bool TextureCache::UploadTexture(VkCommandBuffer command_buffer,
   auto alloc = staging_buffer_.Acquire(unpack_length, completion_fence);
   assert_not_null(alloc);
   if (!alloc) {
-    XELOGE("%s: Failed to acquire staging memory!", __func__);
+    XELOGE("{}: Failed to acquire staging memory!", __func__);
     return false;
   }
 
@@ -1122,7 +1125,7 @@ bool TextureCache::UploadTexture(VkCommandBuffer command_buffer,
   }
 
   if (!valid) {
-    XELOGW("Warning: Texture @ 0x%.8X is blank!", src.memory.base_address);
+    XELOGW("Warning: Texture @ 0x{:08X} is blank!", src.memory.base_address);
   }
 
   // Upload texture into GPU memory.
@@ -1139,14 +1142,14 @@ bool TextureCache::UploadTexture(VkCommandBuffer command_buffer,
        mip++, region++) {
     if (!ConvertTexture(&unpack_buffer[unpack_offset], &copy_regions[region],
                         mip, src)) {
-      XELOGW("Failed to convert texture mip %u!", mip);
+      XELOGW("Failed to convert texture mip {}!", mip);
       return false;
     }
     copy_regions[region].bufferOffset = alloc->offset + unpack_offset;
     copy_regions[region].imageOffset = {0, 0, 0};
 
     /*
-    XELOGGPU("Mip %u %ux%ux%u @ 0x%X", mip,
+    XELOGGPU("Mip {} {}x{}x{} @ 0x{:X}", mip,
              copy_regions[region].imageExtent.width,
              copy_regions[region].imageExtent.height,
              copy_regions[region].imageExtent.depth, unpack_offset);
@@ -1217,23 +1220,23 @@ bool TextureCache::UploadTexture(VkCommandBuffer command_buffer,
   return true;
 }
 
-const FormatInfo* TextureCache::GetFormatInfo(TextureFormat format) {
+const FormatInfo* TextureCache::GetFormatInfo(xenos::TextureFormat format) {
   switch (format) {
-    case TextureFormat::k_CTX1:
-      return FormatInfo::Get(TextureFormat::k_8_8);
-    case TextureFormat::k_DXT3A:
-      return FormatInfo::Get(TextureFormat::k_DXT2_3);
+    case xenos::TextureFormat::k_CTX1:
+      return FormatInfo::Get(xenos::TextureFormat::k_8_8);
+    case xenos::TextureFormat::k_DXT3A:
+      return FormatInfo::Get(xenos::TextureFormat::k_DXT2_3);
     default:
       return FormatInfo::Get(format);
   }
 }
 
 texture_conversion::CopyBlockCallback TextureCache::GetFormatCopyBlock(
-    TextureFormat format) {
+    xenos::TextureFormat format) {
   switch (format) {
-    case TextureFormat::k_CTX1:
+    case xenos::TextureFormat::k_CTX1:
       return texture_conversion::ConvertTexelCTX1ToR8G8;
-    case TextureFormat::k_DXT3A:
+    case xenos::TextureFormat::k_DXT3A:
       return texture_conversion::ConvertTexelDXT3AToDXT3;
     default:
       return texture_conversion::CopySwapBlock;
@@ -1348,7 +1351,7 @@ void TextureCache::WritebackTexture(Texture* texture) {
   // Submit the command buffer.
   // Submit commands and wait.
   {
-    std::lock_guard<std::mutex> queue_lock(device_->primary_queue_mutex());
+    std::lock_guard<std::mutex>(device_->primary_queue_mutex());
     VkSubmitInfo submit_info = {
         VK_STRUCTURE_TYPE_SUBMIT_INFO,
         nullptr,
@@ -1499,9 +1502,30 @@ bool TextureCache::SetupTextureBinding(VkCommandBuffer command_buffer,
 
   // Disabled?
   // TODO(benvanik): reset sampler.
-  if (fetch.type != 0x2) {
-    XELOGGPU("Fetch type is not 2!");
-    return false;
+  switch (fetch.type) {
+    case xenos::FetchConstantType::kTexture:
+      break;
+    case xenos::FetchConstantType::kInvalidTexture:
+      if (cvars::gpu_allow_invalid_fetch_constants) {
+        break;
+      }
+      XELOGW(
+          "Texture fetch constant {} ({:08X} {:08X} {:08X} {:08X} {:08X} "
+          "{:08X}) has "
+          "\"invalid\" type! This is incorrect behavior, but you can try "
+          "bypassing this by launching Xenia with "
+          "--gpu_allow_invalid_fetch_constants=true.",
+          binding.fetch_constant, fetch.dword_0, fetch.dword_1, fetch.dword_2,
+          fetch.dword_3, fetch.dword_4, fetch.dword_5);
+      return false;
+    default:
+      XELOGW(
+          "Texture fetch constant {} ({:08X} {:08X} {:08X} {:08X} {:08X} "
+          "{:08X}) is "
+          "completely invalid!",
+          binding.fetch_constant, fetch.dword_0, fetch.dword_1, fetch.dword_2,
+          fetch.dword_3, fetch.dword_4, fetch.dword_5);
+      return false;
   }
 
   TextureInfo texture_info;

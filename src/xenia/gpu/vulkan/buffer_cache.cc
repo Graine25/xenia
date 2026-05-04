@@ -400,7 +400,7 @@ std::pair<VkDeviceSize, VkDeviceSize> BufferCache::UploadConstantRegisters(
     }
   }
   for (int i = 0; i < 32; ++i) {
-    if (constant_register_map.int_bitmap & (1 << i)) {
+    if (constant_register_map.loop_bitmap & (1 << i)) {
       xe::store<uint32_t>(dest_ptr,
                           values[XE_GPU_REG_SHADER_CONSTANT_LOOP_00 + i].u32);
       dest_ptr += 4;
@@ -420,7 +420,7 @@ std::pair<VkDeviceSize, VkDeviceSize> BufferCache::UploadConstantRegisters(
 
 std::pair<VkBuffer, VkDeviceSize> BufferCache::UploadIndexBuffer(
     VkCommandBuffer command_buffer, uint32_t source_addr,
-    uint32_t source_length, IndexFormat format, VkFence fence) {
+    uint32_t source_length, xenos::IndexFormat format, VkFence fence) {
   // Allocate space in the buffer for our data.
   auto offset = AllocateTransientData(source_length, fence);
   if (offset == VK_WHOLE_SIZE) {
@@ -439,23 +439,23 @@ std::pair<VkBuffer, VkDeviceSize> BufferCache::UploadIndexBuffer(
   // primitive reset indices to something Vulkan understands.
   // TODO(benvanik): memcpy then use compute shaders to swap?
   if (prim_reset_enabled) {
-    if (format == IndexFormat::kInt16) {
+    if (format == xenos::IndexFormat::kInt16) {
       // Endian::k8in16, swap half-words.
       copy_cmp_swap_16_unaligned(
           transient_buffer_->host_base() + offset, source_ptr,
           static_cast<uint16_t>(prim_reset_index), source_length / 2);
-    } else if (format == IndexFormat::kInt32) {
+    } else if (format == xenos::IndexFormat::kInt32) {
       // Endian::k8in32, swap words.
       copy_cmp_swap_32_unaligned(transient_buffer_->host_base() + offset,
                                  source_ptr, prim_reset_index,
                                  source_length / 4);
     }
   } else {
-    if (format == IndexFormat::kInt16) {
+    if (format == xenos::IndexFormat::kInt16) {
       // Endian::k8in16, swap half-words.
       xe::copy_and_swap_16_unaligned(transient_buffer_->host_base() + offset,
                                      source_ptr, source_length / 2);
-    } else if (format == IndexFormat::kInt32) {
+    } else if (format == xenos::IndexFormat::kInt32) {
       // Endian::k8in32, swap words.
       xe::copy_and_swap_32_unaligned(transient_buffer_->host_base() + offset,
                                      source_ptr, source_length / 4);
@@ -485,7 +485,7 @@ std::pair<VkBuffer, VkDeviceSize> BufferCache::UploadIndexBuffer(
 
 std::pair<VkBuffer, VkDeviceSize> BufferCache::UploadVertexBuffer(
     VkCommandBuffer command_buffer, uint32_t source_addr,
-    uint32_t source_length, Endian endian, VkFence fence) {
+    uint32_t source_length, xenos::Endian endian, VkFence fence) {
   auto offset = FindCachedTransientData(source_addr, source_length);
   if (offset != VK_WHOLE_SIZE) {
     return {transient_buffer_->gpu_buffer(), offset};
@@ -509,7 +509,7 @@ std::pair<VkBuffer, VkDeviceSize> BufferCache::UploadVertexBuffer(
     // OOM.
     XELOGW(
         "Failed to allocate transient data for vertex buffer! Wanted to "
-        "allocate %u bytes.",
+        "allocate {} bytes.",
         upload_size);
     return {nullptr, VK_WHOLE_SIZE};
   }
@@ -518,11 +518,11 @@ std::pair<VkBuffer, VkDeviceSize> BufferCache::UploadVertexBuffer(
 
   // Copy data into the buffer.
   // TODO(benvanik): memcpy then use compute shaders to swap?
-  if (endian == Endian::k8in32) {
+  if (endian == xenos::Endian::k8in32) {
     // Endian::k8in32, swap words.
     xe::copy_and_swap_32_unaligned(transient_buffer_->host_base() + offset,
                                    upload_ptr, source_length / 4);
-  } else if (endian == Endian::k16in32) {
+  } else if (endian == xenos::Endian::k16in32) {
     xe::copy_and_swap_16_in_32_unaligned(
         transient_buffer_->host_base() + offset, upload_ptr, source_length / 4);
   } else {
@@ -639,9 +639,26 @@ VkDescriptorSet BufferCache::PrepareVertexSet(
         break;
     }
 
-    if (fetch->type != 0x3) {
-      // TODO(DrChat): Some games use type 0x0 (with no data).
-      return nullptr;
+    // TODO(DrChat): Some games use type kInvalidTexture (with no data).
+    switch (fetch->type) {
+      case xenos::FetchConstantType::kVertex:
+        break;
+      case xenos::FetchConstantType::kInvalidVertex:
+        if (cvars::gpu_allow_invalid_fetch_constants) {
+          break;
+        }
+        XELOGW(
+            "Vertex fetch constant {} ({:08X} {:08X}) has \"invalid\" type! "
+            "This "
+            "is incorrect behavior, but you can try bypassing this by "
+            "launching Xenia with --gpu_allow_invalid_fetch_constants=true.",
+            vertex_binding.fetch_constant, fetch->dword_0, fetch->dword_1);
+        return nullptr;
+      default:
+        XELOGW(
+            "Vertex fetch constant {} ({:08X} {:08X}) is completely invalid!",
+            vertex_binding.fetch_constant, fetch->dword_0, fetch->dword_1);
+        return nullptr;
     }
 
     // TODO(benvanik): compute based on indices or vertex count.
@@ -654,9 +671,8 @@ VkDescriptorSet BufferCache::PrepareVertexSet(
     // trace_writer_.WriteMemoryRead(physical_address, source_length);
 
     // Upload (or get a cached copy of) the buffer.
-    auto buffer_ref =
-        UploadVertexBuffer(command_buffer, physical_address, source_length,
-                           static_cast<Endian>(fetch->endian), fence);
+    auto buffer_ref = UploadVertexBuffer(command_buffer, physical_address,
+                                         source_length, fetch->endian, fence);
     if (buffer_ref.second == VK_WHOLE_SIZE) {
       // Failed to upload buffer.
       XELOGW("Failed to upload vertex buffer!");

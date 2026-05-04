@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2018 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -28,13 +28,13 @@ class D3D12GraphicsSystem : public GraphicsSystem {
 
   static bool IsAvailable();
 
-  std::wstring name() const override;
+  std::string name() const override;
 
   X_STATUS Setup(cpu::Processor* processor, kernel::KernelState* kernel_state,
                  ui::Window* target_window) override;
   void Shutdown() override;
 
-  void AwaitFrontBufferUnused();
+  std::unique_ptr<xe::ui::RawImage> Capture() override;
 
   // Draws a texture covering the entire viewport to the render target currently
   // bound on the specified command list (in D3D12Context::kSwapChainFormat).

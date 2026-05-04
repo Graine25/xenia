@@ -18,6 +18,11 @@ NullCommandProcessor::NullCommandProcessor(NullGraphicsSystem* graphics_system,
     : CommandProcessor(graphics_system, kernel_state) {}
 NullCommandProcessor::~NullCommandProcessor() = default;
 
+void NullCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
+                                                    uint32_t length) {}
+
+void NullCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {}
+
 bool NullCommandProcessor::SetupContext() {
   return CommandProcessor::SetupContext();
 }
@@ -30,20 +35,25 @@ void NullCommandProcessor::PerformSwap(uint32_t frontbuffer_ptr,
                                        uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {}
 
-Shader* NullCommandProcessor::LoadShader(ShaderType shader_type,
+Shader* NullCommandProcessor::LoadShader(xenos::ShaderType shader_type,
                                          uint32_t guest_address,
                                          const uint32_t* host_address,
                                          uint32_t dword_count) {
   return nullptr;
 }
 
-bool NullCommandProcessor::IssueDraw(PrimitiveType prim_type,
+bool NullCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                      uint32_t index_count,
-                                     IndexBufferInfo* index_buffer_info) {
+                                     IndexBufferInfo* index_buffer_info,
+                                     bool major_mode_explicit) {
   return true;
 }
 
 bool NullCommandProcessor::IssueCopy() { return true; }
+
+void NullCommandProcessor::InitializeTrace() {}
+
+void NullCommandProcessor::FinalizeTrace() {}
 
 }  // namespace null
 }  // namespace gpu

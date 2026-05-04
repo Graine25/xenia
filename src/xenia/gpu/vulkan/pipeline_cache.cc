@@ -36,7 +36,6 @@ using xe::ui::vulkan::CheckResult;
 PipelineCache::PipelineCache(RegisterFile* register_file,
                              ui::vulkan::VulkanDevice* device)
     : register_file_(register_file), device_(device) {
-  // We can also use the GLSL translator with a Vulkan dialect.
   shader_translator_.reset(new SpirvShaderTranslator());
 }
 
@@ -204,7 +203,7 @@ void PipelineCache::Shutdown() {
   }
 }
 
-VulkanShader* PipelineCache::LoadShader(ShaderType shader_type,
+VulkanShader* PipelineCache::LoadShader(xenos::ShaderType shader_type,
                                         uint32_t guest_address,
                                         const uint32_t* host_address,
                                         uint32_t dword_count) {
@@ -229,7 +228,7 @@ VulkanShader* PipelineCache::LoadShader(ShaderType shader_type,
 PipelineCache::UpdateStatus PipelineCache::ConfigurePipeline(
     VkCommandBuffer command_buffer, const RenderState* render_state,
     VulkanShader* vertex_shader, VulkanShader* pixel_shader,
-    PrimitiveType primitive_type, VkPipeline* pipeline_out) {
+    xenos::PrimitiveType primitive_type, VkPipeline* pipeline_out) {
 #if FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // FINE_GRAINED_DRAW_SCOPES
@@ -341,7 +340,7 @@ VkPipeline PipelineCache::GetPipeline(const RenderState* render_state,
   auto result = vkCreateGraphicsPipelines(*device_, pipeline_cache_, 1,
                                           &pipeline_info, nullptr, &pipeline);
   if (result != VK_SUCCESS) {
-    XELOGE("vkCreateGraphicsPipelines failed with code %d", result);
+    XELOGE("vkCreateGraphicsPipelines failed with code {}", result);
     assert_always();
     return nullptr;
   }
@@ -364,10 +363,10 @@ VkPipeline PipelineCache::GetPipeline(const RenderState* render_state,
 }
 
 bool PipelineCache::TranslateShader(VulkanShader* shader,
-                                    xenos::xe_gpu_program_cntl_t cntl) {
+                                    reg::SQ_PROGRAM_CNTL cntl) {
   // Perform translation.
   // If this fails the shader will be marked as invalid and ignored later.
-  if (!shader_translator_->Translate(shader, PrimitiveType::kNone, cntl)) {
+  if (!shader_translator_->Translate(shader, cntl)) {
     XELOGE("Shader translation failed; marking shader as ignored");
     return false;
   }
@@ -380,10 +379,10 @@ bool PipelineCache::TranslateShader(VulkanShader* shader,
   }
 
   if (shader->is_valid()) {
-    XELOGGPU("Generated %s shader (%db) - hash %.16" PRIX64 ":\n%s\n",
-             shader->type() == ShaderType::kVertex ? "vertex" : "pixel",
+    XELOGGPU("Generated {} shader ({}b) - hash {:016X}:\n{}\n",
+             shader->type() == xenos::ShaderType::kVertex ? "vertex" : "pixel",
              shader->ucode_dword_count() * 4, shader->ucode_data_hash(),
-             shader->ucode_disassembly().c_str());
+             shader->ucode_disassembly());
   }
 
   // Dump shader files if desired.
@@ -396,18 +395,18 @@ bool PipelineCache::TranslateShader(VulkanShader* shader,
 
 static void DumpShaderStatisticsAMD(const VkShaderStatisticsInfoAMD& stats) {
   XELOGI(" - resource usage:");
-  XELOGI("   numUsedVgprs: %d", stats.resourceUsage.numUsedVgprs);
-  XELOGI("   numUsedSgprs: %d", stats.resourceUsage.numUsedSgprs);
-  XELOGI("   ldsSizePerLocalWorkGroup: %d",
+  XELOGI("   numUsedVgprs: {}", stats.resourceUsage.numUsedVgprs);
+  XELOGI("   numUsedSgprs: {}", stats.resourceUsage.numUsedSgprs);
+  XELOGI("   ldsSizePerLocalWorkGroup: {}",
          stats.resourceUsage.ldsSizePerLocalWorkGroup);
-  XELOGI("   ldsUsageSizeInBytes     : %d",
+  XELOGI("   ldsUsageSizeInBytes     : {}",
          stats.resourceUsage.ldsUsageSizeInBytes);
-  XELOGI("   scratchMemUsageInBytes  : %d",
+  XELOGI("   scratchMemUsageInBytes  : {}",
          stats.resourceUsage.scratchMemUsageInBytes);
-  XELOGI("numPhysicalVgprs : %d", stats.numPhysicalVgprs);
-  XELOGI("numPhysicalSgprs : %d", stats.numPhysicalSgprs);
-  XELOGI("numAvailableVgprs: %d", stats.numAvailableVgprs);
-  XELOGI("numAvailableSgprs: %d", stats.numAvailableSgprs);
+  XELOGI("numPhysicalVgprs : {}", stats.numPhysicalVgprs);
+  XELOGI("numPhysicalSgprs : {}", stats.numPhysicalSgprs);
+  XELOGI("numAvailableVgprs: {}", stats.numAvailableVgprs);
+  XELOGI("numAvailableSgprs: {}", stats.numAvailableSgprs);
 }
 
 void PipelineCache::DumpShaderDisasmAMD(VkPipeline pipeline) {
@@ -522,41 +521,41 @@ void PipelineCache::DumpShaderDisasmNV(
       disasm_fp = std::string("Shader disassembly not available.");
     }
 
-    XELOGI("%s\n=====================================\n%s\n", disasm_vp.c_str(),
-           disasm_fp.c_str());
+    XELOGI("{}\n=====================================\n{}\n", disasm_vp,
+           disasm_fp);
   }
 
   vkDestroyPipeline(*device_, dummy_pipeline, nullptr);
   vkDestroyPipelineCache(*device_, dummy_pipeline_cache, nullptr);
 }
 
-VkShaderModule PipelineCache::GetGeometryShader(PrimitiveType primitive_type,
-                                                bool is_line_mode) {
+VkShaderModule PipelineCache::GetGeometryShader(
+    xenos::PrimitiveType primitive_type, bool is_line_mode) {
   switch (primitive_type) {
-    case PrimitiveType::kLineList:
-    case PrimitiveType::kLineLoop:
-    case PrimitiveType::kLineStrip:
-    case PrimitiveType::kTriangleList:
-    case PrimitiveType::kTriangleFan:
-    case PrimitiveType::kTriangleStrip:
+    case xenos::PrimitiveType::kLineList:
+    case xenos::PrimitiveType::kLineLoop:
+    case xenos::PrimitiveType::kLineStrip:
+    case xenos::PrimitiveType::kTriangleList:
+    case xenos::PrimitiveType::kTriangleFan:
+    case xenos::PrimitiveType::kTriangleStrip:
       // Supported directly - no need to emulate.
       return nullptr;
-    case PrimitiveType::kPointList:
+    case xenos::PrimitiveType::kPointList:
       return geometry_shaders_.point_list;
-    case PrimitiveType::kTriangleWithWFlags:
+    case xenos::PrimitiveType::kTriangleWithWFlags:
       assert_always("Unknown geometry type");
       return nullptr;
-    case PrimitiveType::kRectangleList:
+    case xenos::PrimitiveType::kRectangleList:
       return geometry_shaders_.rect_list;
-    case PrimitiveType::kQuadList:
+    case xenos::PrimitiveType::kQuadList:
       return is_line_mode ? geometry_shaders_.line_quad_list
                           : geometry_shaders_.quad_list;
-    case PrimitiveType::kQuadStrip:
+    case xenos::PrimitiveType::kQuadStrip:
       // TODO(benvanik): quad strip geometry shader.
       assert_always("Quad strips not implemented");
       return nullptr;
-    case PrimitiveType::kTrianglePatch:
-    case PrimitiveType::kQuadPatch:
+    case xenos::PrimitiveType::kTrianglePatch:
+    case xenos::PrimitiveType::kQuadPatch:
       assert_always("Tessellation is not implemented");
       return nullptr;
     default:
@@ -641,18 +640,18 @@ bool PipelineCache::SetDynamicState(VkCommandBuffer command_buffer,
                                             XE_GPU_REG_PA_CL_VPORT_ZSCALE);
   // RB_SURFACE_INFO
   auto surface_msaa =
-      static_cast<MsaaSamples>((regs.rb_surface_info >> 16) & 0x3);
+      static_cast<xenos::MsaaSamples>((regs.rb_surface_info >> 16) & 0x3);
 
   // Apply a multiplier to emulate MSAA.
   float window_width_scalar = 1;
   float window_height_scalar = 1;
   switch (surface_msaa) {
-    case MsaaSamples::k1X:
+    case xenos::MsaaSamples::k1X:
       break;
-    case MsaaSamples::k2X:
+    case xenos::MsaaSamples::k2X:
       window_height_scalar = 2;
       break;
-    case MsaaSamples::k4X:
+    case xenos::MsaaSamples::k4X:
       window_width_scalar = window_height_scalar = 2;
       break;
   }
@@ -808,44 +807,33 @@ bool PipelineCache::SetDynamicState(VkCommandBuffer command_buffer,
   }
 
   bool push_constants_dirty = full_update || viewport_state_dirty;
-  push_constants_dirty |=
-      SetShadowRegister(&regs.sq_program_cntl, XE_GPU_REG_SQ_PROGRAM_CNTL);
+  push_constants_dirty |= SetShadowRegister(&regs.sq_program_cntl.value,
+                                            XE_GPU_REG_SQ_PROGRAM_CNTL);
   push_constants_dirty |=
       SetShadowRegister(&regs.sq_context_misc, XE_GPU_REG_SQ_CONTEXT_MISC);
   push_constants_dirty |=
       SetShadowRegister(&regs.rb_colorcontrol, XE_GPU_REG_RB_COLORCONTROL);
   push_constants_dirty |=
-      SetShadowRegister(&regs.rb_color_info, XE_GPU_REG_RB_COLOR_INFO);
+      SetShadowRegister(&regs.rb_color_info.value, XE_GPU_REG_RB_COLOR_INFO);
   push_constants_dirty |=
-      SetShadowRegister(&regs.rb_color1_info, XE_GPU_REG_RB_COLOR1_INFO);
+      SetShadowRegister(&regs.rb_color1_info.value, XE_GPU_REG_RB_COLOR1_INFO);
   push_constants_dirty |=
-      SetShadowRegister(&regs.rb_color2_info, XE_GPU_REG_RB_COLOR2_INFO);
+      SetShadowRegister(&regs.rb_color2_info.value, XE_GPU_REG_RB_COLOR2_INFO);
   push_constants_dirty |=
-      SetShadowRegister(&regs.rb_color3_info, XE_GPU_REG_RB_COLOR3_INFO);
+      SetShadowRegister(&regs.rb_color3_info.value, XE_GPU_REG_RB_COLOR3_INFO);
   push_constants_dirty |=
       SetShadowRegister(&regs.rb_alpha_ref, XE_GPU_REG_RB_ALPHA_REF);
   push_constants_dirty |=
       SetShadowRegister(&regs.pa_su_point_size, XE_GPU_REG_PA_SU_POINT_SIZE);
   if (push_constants_dirty) {
-    xenos::xe_gpu_program_cntl_t program_cntl;
-    program_cntl.dword_0 = regs.sq_program_cntl;
-
     // Normal vertex shaders only, for now.
-    // TODO(benvanik): transform feedback/memexport.
-    // https://github.com/freedreno/freedreno/blob/master/includes/a2xx.xml.h
-    // Draw calls skipped if they have unsupported export modes.
-    // 0 = positionOnly
-    // 1 = unused
-    // 2 = sprite
-    // 3 = edge
-    // 4 = kill
-    // 5 = spriteKill
-    // 6 = edgeKill
-    // 7 = multipass
-    assert_true(program_cntl.vs_export_mode == 0 ||
-                program_cntl.vs_export_mode == 2 ||
-                program_cntl.vs_export_mode == 7);
-    assert_false(program_cntl.gen_index_vtx);
+    assert_true(regs.sq_program_cntl.vs_export_mode ==
+                    xenos::VertexShaderExportMode::kPosition1Vector ||
+                regs.sq_program_cntl.vs_export_mode ==
+                    xenos::VertexShaderExportMode::kPosition2VectorsSprite ||
+                regs.sq_program_cntl.vs_export_mode ==
+                    xenos::VertexShaderExportMode::kMultipass);
+    assert_false(regs.sq_program_cntl.gen_index_vtx);
 
     SpirvPushConstants push_constants = {};
 
@@ -909,7 +897,8 @@ bool PipelineCache::SetDynamicState(VkCommandBuffer command_buffer,
 
     // Whether to populate a register in the pixel shader with frag coord.
     int ps_param_gen = (regs.sq_context_misc >> 8) & 0xFF;
-    push_constants.ps_param_gen = program_cntl.param_gen ? ps_param_gen : -1;
+    push_constants.ps_param_gen =
+        regs.sq_program_cntl.param_gen ? ps_param_gen : -1;
 
     vkCmdPushConstants(command_buffer, pipeline_layout_,
                        VK_SHADER_STAGE_VERTEX_BIT |
@@ -965,7 +954,7 @@ bool PipelineCache::SetShadowRegisterArray(uint32_t* dest, uint32_t num,
 
 PipelineCache::UpdateStatus PipelineCache::UpdateState(
     VulkanShader* vertex_shader, VulkanShader* pixel_shader,
-    PrimitiveType primitive_type) {
+    xenos::PrimitiveType primitive_type) {
   bool mismatch = false;
 
   // Reset hash so we can build it up.
@@ -1046,7 +1035,7 @@ PipelineCache::UpdateStatus PipelineCache::UpdateRenderTargetState() {
 
 PipelineCache::UpdateStatus PipelineCache::UpdateShaderStages(
     VulkanShader* vertex_shader, VulkanShader* pixel_shader,
-    PrimitiveType primitive_type) {
+    xenos::PrimitiveType primitive_type) {
   auto& regs = update_shader_stages_regs_;
 
   // These are the constant base addresses/ranges for shaders.
@@ -1061,7 +1050,8 @@ PipelineCache::UpdateStatus PipelineCache::UpdateShaderStages(
   bool dirty = false;
   dirty |= SetShadowRegister(&regs.pa_su_sc_mode_cntl,
                              XE_GPU_REG_PA_SU_SC_MODE_CNTL);
-  dirty |= SetShadowRegister(&regs.sq_program_cntl, XE_GPU_REG_SQ_PROGRAM_CNTL);
+  dirty |= SetShadowRegister(&regs.sq_program_cntl.value,
+                             XE_GPU_REG_SQ_PROGRAM_CNTL);
   dirty |= regs.vertex_shader != vertex_shader;
   dirty |= regs.pixel_shader != pixel_shader;
   dirty |= regs.primitive_type != primitive_type;
@@ -1073,17 +1063,14 @@ PipelineCache::UpdateStatus PipelineCache::UpdateShaderStages(
     return UpdateStatus::kCompatible;
   }
 
-  xenos::xe_gpu_program_cntl_t sq_program_cntl;
-  sq_program_cntl.dword_0 = regs.sq_program_cntl;
-
   if (!vertex_shader->is_translated() &&
-      !TranslateShader(vertex_shader, sq_program_cntl)) {
+      !TranslateShader(vertex_shader, regs.sq_program_cntl)) {
     XELOGE("Failed to translate the vertex shader!");
     return UpdateStatus::kError;
   }
 
   if (pixel_shader && !pixel_shader->is_translated() &&
-      !TranslateShader(pixel_shader, sq_program_cntl)) {
+      !TranslateShader(pixel_shader, regs.sq_program_cntl)) {
     XELOGE("Failed to translate the pixel shader!");
     return UpdateStatus::kError;
   }
@@ -1163,7 +1150,7 @@ PipelineCache::UpdateStatus PipelineCache::UpdateVertexInputState(
 }
 
 PipelineCache::UpdateStatus PipelineCache::UpdateInputAssemblyState(
-    PrimitiveType primitive_type) {
+    xenos::PrimitiveType primitive_type) {
   auto& regs = update_input_assembly_state_regs_;
   auto& state_info = update_input_assembly_state_info_;
 
@@ -1185,36 +1172,36 @@ PipelineCache::UpdateStatus PipelineCache::UpdateInputAssemblyState(
   state_info.flags = 0;
 
   switch (primitive_type) {
-    case PrimitiveType::kPointList:
+    case xenos::PrimitiveType::kPointList:
       state_info.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
       break;
-    case PrimitiveType::kLineList:
+    case xenos::PrimitiveType::kLineList:
       state_info.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
       break;
-    case PrimitiveType::kLineStrip:
+    case xenos::PrimitiveType::kLineStrip:
       state_info.topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
       break;
-    case PrimitiveType::kLineLoop:
+    case xenos::PrimitiveType::kLineLoop:
       state_info.topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
       break;
-    case PrimitiveType::kTriangleList:
+    case xenos::PrimitiveType::kTriangleList:
       state_info.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
       break;
-    case PrimitiveType::kTriangleStrip:
+    case xenos::PrimitiveType::kTriangleStrip:
       state_info.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
       break;
-    case PrimitiveType::kTriangleFan:
+    case xenos::PrimitiveType::kTriangleFan:
       state_info.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
       break;
-    case PrimitiveType::kRectangleList:
+    case xenos::PrimitiveType::kRectangleList:
       state_info.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
       break;
-    case PrimitiveType::kQuadList:
+    case xenos::PrimitiveType::kQuadList:
       state_info.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY;
       break;
     default:
-    case PrimitiveType::kTriangleWithWFlags:
-      XELOGE("unsupported primitive type %d", primitive_type);
+    case xenos::PrimitiveType::kTriangleWithWFlags:
+      XELOGE("unsupported primitive type {}", primitive_type);
       assert_unhandled_case(primitive_type);
       return UpdateStatus::kError;
   }
@@ -1256,7 +1243,7 @@ PipelineCache::UpdateStatus PipelineCache::UpdateViewportState() {
 }
 
 PipelineCache::UpdateStatus PipelineCache::UpdateRasterizationState(
-    PrimitiveType primitive_type) {
+    xenos::PrimitiveType primitive_type) {
   auto& regs = update_rasterization_state_regs_;
   auto& state_info = update_rasterization_state_info_;
 
@@ -1354,10 +1341,10 @@ PipelineCache::UpdateStatus PipelineCache::UpdateRasterizationState(
   } else {
     state_info.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
   }
-  if (primitive_type == PrimitiveType::kRectangleList) {
+  if (primitive_type == xenos::PrimitiveType::kRectangleList) {
     // Rectangle lists aren't culled. There may be other things they skip too.
     state_info.cullMode = VK_CULL_MODE_NONE;
-  } else if (primitive_type == PrimitiveType::kPointList) {
+  } else if (primitive_type == xenos::PrimitiveType::kPointList) {
     // Face culling doesn't apply to point primitives.
     state_info.cullMode = VK_CULL_MODE_NONE;
   }
@@ -1398,15 +1385,15 @@ PipelineCache::UpdateStatus PipelineCache::UpdateMultisampleState() {
   // all sampled from the pixel center.
   if (cvars::vulkan_native_msaa) {
     auto msaa_num_samples =
-        static_cast<MsaaSamples>((regs.rb_surface_info >> 16) & 0x3);
+        static_cast<xenos::MsaaSamples>((regs.rb_surface_info >> 16) & 0x3);
     switch (msaa_num_samples) {
-      case MsaaSamples::k1X:
+      case xenos::MsaaSamples::k1X:
         state_info.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
         break;
-      case MsaaSamples::k2X:
+      case xenos::MsaaSamples::k2X:
         state_info.rasterizationSamples = VK_SAMPLE_COUNT_2_BIT;
         break;
-      case MsaaSamples::k4X:
+      case xenos::MsaaSamples::k4X:
         state_info.rasterizationSamples = VK_SAMPLE_COUNT_4_BIT;
         break;
       default:
@@ -1513,16 +1500,15 @@ PipelineCache::UpdateStatus PipelineCache::UpdateColorBlendState() {
   auto& state_info = update_color_blend_state_info_;
 
   bool dirty = false;
-  dirty |= SetShadowRegister(&regs.rb_colorcontrol, XE_GPU_REG_RB_COLORCONTROL);
   dirty |= SetShadowRegister(&regs.rb_color_mask, XE_GPU_REG_RB_COLOR_MASK);
   dirty |=
-      SetShadowRegister(&regs.rb_blendcontrol[0], XE_GPU_REG_RB_BLENDCONTROL_0);
+      SetShadowRegister(&regs.rb_blendcontrol[0], XE_GPU_REG_RB_BLENDCONTROL0);
   dirty |=
-      SetShadowRegister(&regs.rb_blendcontrol[1], XE_GPU_REG_RB_BLENDCONTROL_1);
+      SetShadowRegister(&regs.rb_blendcontrol[1], XE_GPU_REG_RB_BLENDCONTROL1);
   dirty |=
-      SetShadowRegister(&regs.rb_blendcontrol[2], XE_GPU_REG_RB_BLENDCONTROL_2);
+      SetShadowRegister(&regs.rb_blendcontrol[2], XE_GPU_REG_RB_BLENDCONTROL2);
   dirty |=
-      SetShadowRegister(&regs.rb_blendcontrol[3], XE_GPU_REG_RB_BLENDCONTROL_3);
+      SetShadowRegister(&regs.rb_blendcontrol[3], XE_GPU_REG_RB_BLENDCONTROL3);
   dirty |= SetShadowRegister(&regs.rb_modecontrol, XE_GPU_REG_RB_MODECONTROL);
   XXH64_update(&hash_state_, &regs, sizeof(regs));
   if (!dirty) {
@@ -1568,7 +1554,7 @@ PipelineCache::UpdateStatus PipelineCache::UpdateColorBlendState() {
   for (int i = 0; i < 4; ++i) {
     uint32_t blend_control = regs.rb_blendcontrol[i];
     auto& attachment_state = attachment_states[i];
-    attachment_state.blendEnable = !(regs.rb_colorcontrol & 0x20);
+    attachment_state.blendEnable = (blend_control & 0x1FFF1FFF) != 0x00010001;
     // A2XX_RB_BLEND_CONTROL_COLOR_SRCBLEND
     attachment_state.srcColorBlendFactor =
         kBlendFactorMap[(blend_control & 0x0000001F) >> 0];

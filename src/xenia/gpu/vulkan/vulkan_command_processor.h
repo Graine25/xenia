@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2016 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -50,7 +50,9 @@ class VulkanCommandProcessor : public CommandProcessor {
                          kernel::KernelState* kernel_state);
   ~VulkanCommandProcessor() override;
 
-  virtual void RequestFrameTrace(const std::wstring& root_path) override;
+  void RequestFrameTrace(const std::filesystem::path& root_path) override;
+  void TracePlaybackWroteMemory(uint32_t base_ptr, uint32_t length) override;
+  void RestoreEdramSnapshot(const void* snapshot) override;
   void ClearCaches() override;
 
   RenderCache* render_cache() { return render_cache_.get(); }
@@ -74,12 +76,13 @@ class VulkanCommandProcessor : public CommandProcessor {
   void PerformSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                    uint32_t frontbuffer_height) override;
 
-  Shader* LoadShader(ShaderType shader_type, uint32_t guest_address,
+  Shader* LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
                      const uint32_t* host_address,
                      uint32_t dword_count) override;
 
-  bool IssueDraw(PrimitiveType primitive_type, uint32_t index_count,
-                 IndexBufferInfo* index_buffer_info) override;
+  bool IssueDraw(xenos::PrimitiveType primitive_type, uint32_t index_count,
+                 IndexBufferInfo* index_buffer_info,
+                 bool major_mode_explicit) override;
   bool PopulateConstants(VkCommandBuffer command_buffer,
                          VulkanShader* vertex_shader,
                          VulkanShader* pixel_shader);
@@ -93,6 +96,9 @@ class VulkanCommandProcessor : public CommandProcessor {
                         VulkanShader* vertex_shader,
                         VulkanShader* pixel_shader);
   bool IssueCopy() override;
+
+  void InitializeTrace() override;
+  void FinalizeTrace() override;
 
   xe::ui::vulkan::VulkanDevice* device_ = nullptr;
 

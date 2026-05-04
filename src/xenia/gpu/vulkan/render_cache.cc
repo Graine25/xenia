@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2016 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -10,8 +10,8 @@
 #include "xenia/gpu/vulkan/render_cache.h"
 
 #include <algorithm>
-#include <cstring>
 
+#include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
@@ -29,41 +29,43 @@ using xe::ui::vulkan::CheckResult;
 
 constexpr uint32_t kEdramBufferCapacity = 10 * 1024 * 1024;
 
-ColorRenderTargetFormat GetBaseRTFormat(ColorRenderTargetFormat format) {
+xenos::ColorRenderTargetFormat GetBaseRTFormat(
+    xenos::ColorRenderTargetFormat format) {
   switch (format) {
-    case ColorRenderTargetFormat::k_8_8_8_8_GAMMA:
-      return ColorRenderTargetFormat::k_8_8_8_8;
-    case ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
-      return ColorRenderTargetFormat::k_2_10_10_10;
-    case ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
-      return ColorRenderTargetFormat::k_2_10_10_10_FLOAT;
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA:
+      return xenos::ColorRenderTargetFormat::k_8_8_8_8;
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
+      return xenos::ColorRenderTargetFormat::k_2_10_10_10;
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
+      return xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT;
     default:
       return format;
   }
 }
 
-VkFormat ColorRenderTargetFormatToVkFormat(ColorRenderTargetFormat format) {
+VkFormat ColorRenderTargetFormatToVkFormat(
+    xenos::ColorRenderTargetFormat format) {
   switch (format) {
-    case ColorRenderTargetFormat::k_8_8_8_8:
-    case ColorRenderTargetFormat::k_8_8_8_8_GAMMA:
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8:
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA:
       return VK_FORMAT_R8G8B8A8_UNORM;
-    case ColorRenderTargetFormat::k_2_10_10_10:
-    case ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
       return VK_FORMAT_A2R10G10B10_UNORM_PACK32;
-    case ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
-    case ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
       return VK_FORMAT_R16G16B16A16_SFLOAT;
-    case ColorRenderTargetFormat::k_16_16:
+    case xenos::ColorRenderTargetFormat::k_16_16:
       return VK_FORMAT_R16G16_UNORM;
-    case ColorRenderTargetFormat::k_16_16_16_16:
+    case xenos::ColorRenderTargetFormat::k_16_16_16_16:
       return VK_FORMAT_R16G16B16A16_UNORM;
-    case ColorRenderTargetFormat::k_16_16_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_16_16_FLOAT:
       return VK_FORMAT_R16G16_SFLOAT;
-    case ColorRenderTargetFormat::k_16_16_16_16_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT:
       return VK_FORMAT_R16G16B16A16_SFLOAT;
-    case ColorRenderTargetFormat::k_32_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_32_FLOAT:
       return VK_FORMAT_R32_SFLOAT;
-    case ColorRenderTargetFormat::k_32_32_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_32_32_FLOAT:
       return VK_FORMAT_R32G32_SFLOAT;
     default:
       assert_unhandled_case(key.edram_format);
@@ -71,11 +73,12 @@ VkFormat ColorRenderTargetFormatToVkFormat(ColorRenderTargetFormat format) {
   }
 }
 
-VkFormat DepthRenderTargetFormatToVkFormat(DepthRenderTargetFormat format) {
+VkFormat DepthRenderTargetFormatToVkFormat(
+    xenos::DepthRenderTargetFormat format) {
   switch (format) {
-    case DepthRenderTargetFormat::kD24S8:
+    case xenos::DepthRenderTargetFormat::kD24S8:
       return VK_FORMAT_D24_UNORM_S8_UINT;
-    case DepthRenderTargetFormat::kD24FS8:
+    case xenos::DepthRenderTargetFormat::kD24FS8:
       // Vulkan doesn't support 24-bit floats, so just promote it to 32-bit
       return VK_FORMAT_D32_SFLOAT_S8_UINT;
     default:
@@ -161,12 +164,13 @@ VkResult CachedTileView::Initialize(VkCommandBuffer command_buffer) {
   VkFormat vulkan_format = VK_FORMAT_UNDEFINED;
   uint32_t bpp = 4;
   if (key.color_or_depth) {
-    auto edram_format = static_cast<ColorRenderTargetFormat>(key.edram_format);
+    auto edram_format =
+        static_cast<xenos::ColorRenderTargetFormat>(key.edram_format);
     vulkan_format = ColorRenderTargetFormatToVkFormat(edram_format);
     switch (edram_format) {
-      case ColorRenderTargetFormat::k_16_16_16_16:
-      case ColorRenderTargetFormat::k_16_16_16_16_FLOAT:
-      case ColorRenderTargetFormat::k_32_32_FLOAT:
+      case xenos::ColorRenderTargetFormat::k_16_16_16_16:
+      case xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT:
+      case xenos::ColorRenderTargetFormat::k_32_32_FLOAT:
         bpp = 8;
         break;
       default:
@@ -174,7 +178,8 @@ VkResult CachedTileView::Initialize(VkCommandBuffer command_buffer) {
         break;
     }
   } else {
-    auto edram_format = static_cast<DepthRenderTargetFormat>(key.edram_format);
+    auto edram_format =
+        static_cast<xenos::DepthRenderTargetFormat>(key.edram_format);
     vulkan_format = DepthRenderTargetFormatToVkFormat(edram_format);
   }
   assert_true(vulkan_format != VK_FORMAT_UNDEFINED);
@@ -196,15 +201,15 @@ VkResult CachedTileView::Initialize(VkCommandBuffer command_buffer) {
   image_info.mipLevels = 1;
   image_info.arrayLayers = 1;
   if (cvars::vulkan_native_msaa) {
-    auto msaa_samples = static_cast<MsaaSamples>(key.msaa_samples);
+    auto msaa_samples = static_cast<xenos::MsaaSamples>(key.msaa_samples);
     switch (msaa_samples) {
-      case MsaaSamples::k1X:
+      case xenos::MsaaSamples::k1X:
         image_info.samples = VK_SAMPLE_COUNT_1_BIT;
         break;
-      case MsaaSamples::k2X:
+      case xenos::MsaaSamples::k2X:
         image_info.samples = VK_SAMPLE_COUNT_2_BIT;
         break;
-      case MsaaSamples::k4X:
+      case xenos::MsaaSamples::k4X:
         image_info.samples = VK_SAMPLE_COUNT_4_BIT;
         break;
       default:
@@ -232,10 +237,11 @@ VkResult CachedTileView::Initialize(VkCommandBuffer command_buffer) {
 
   device_->DbgSetObjectName(
       reinterpret_cast<uint64_t>(image), VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT,
-      xe::format_string("RT(d): 0x%.8X 0x%.8X(%d) 0x%.8X(%d) %d %d %d",
-                        key.tile_offset, key.tile_width, key.tile_width,
-                        key.tile_height, key.tile_height, key.color_or_depth,
-                        key.msaa_samples, key.edram_format));
+      fmt::format("RT(d): 0x{:08X} 0x{:08X}({}) 0x{:08X}({}) {} {} {}",
+                  uint32_t(key.tile_offset), uint32_t(key.tile_width),
+                  uint32_t(key.tile_width), uint32_t(key.tile_height),
+                  uint32_t(key.tile_height), uint32_t(key.color_or_depth),
+                  uint32_t(key.msaa_samples), uint32_t(key.edram_format)));
 
   VkMemoryRequirements memory_requirements;
   vkGetImageMemoryRequirements(*device_, image, &memory_requirements);
@@ -370,12 +376,14 @@ bool CachedFramebuffer::IsCompatible(
     const RenderConfiguration& desired_config) const {
   // We already know all render pass things line up, so let's verify dimensions,
   // edram offsets, etc. We need an exact match.
-  uint32_t surface_pitch_px = desired_config.surface_msaa != MsaaSamples::k4X
-                                  ? desired_config.surface_pitch_px
-                                  : desired_config.surface_pitch_px * 2;
-  uint32_t surface_height_px = desired_config.surface_msaa == MsaaSamples::k1X
-                                   ? desired_config.surface_height_px
-                                   : desired_config.surface_height_px * 2;
+  uint32_t surface_pitch_px =
+      desired_config.surface_msaa != xenos::MsaaSamples::k4X
+          ? desired_config.surface_pitch_px
+          : desired_config.surface_pitch_px * 2;
+  uint32_t surface_height_px =
+      desired_config.surface_msaa == xenos::MsaaSamples::k1X
+          ? desired_config.surface_height_px
+          : desired_config.surface_height_px * 2;
   surface_pitch_px = std::min(surface_pitch_px, 2560u);
   surface_height_px = std::min(surface_height_px, 2560u);
   if (surface_pitch_px != width || surface_height_px != height) {
@@ -383,10 +391,6 @@ bool CachedFramebuffer::IsCompatible(
   }
   // TODO(benvanik): separate image views from images in tiles and store in fb?
   for (int i = 0; i < 4; ++i) {
-    if (desired_config.color[i].used != (color_attachments[i] != nullptr)) {
-      return false;
-    }
-
     // Ensure the the attachment points to the same tile.
     if (!color_attachments[i]) {
       continue;
@@ -400,10 +404,6 @@ bool CachedFramebuffer::IsCompatible(
     }
   }
   // Ensure depth attachment is correct.
-  if (desired_config.depth_stencil.used !=
-      (depth_stencil_attachment != nullptr)) {
-    return false;
-  }
   if (depth_stencil_attachment &&
       (depth_stencil_attachment->key.tile_offset !=
            desired_config.depth_stencil.edram_base ||
@@ -433,13 +433,13 @@ VkResult CachedRenderPass::Initialize() {
   VkSampleCountFlagBits sample_count;
   if (cvars::vulkan_native_msaa) {
     switch (config.surface_msaa) {
-      case MsaaSamples::k1X:
+      case xenos::MsaaSamples::k1X:
         sample_count = VK_SAMPLE_COUNT_1_BIT;
         break;
-      case MsaaSamples::k2X:
+      case xenos::MsaaSamples::k2X:
         sample_count = VK_SAMPLE_COUNT_2_BIT;
         break;
-      case MsaaSamples::k4X:
+      case xenos::MsaaSamples::k4X:
         sample_count = VK_SAMPLE_COUNT_4_BIT;
         break;
       default:
@@ -450,58 +450,55 @@ VkResult CachedRenderPass::Initialize() {
     sample_count = VK_SAMPLE_COUNT_1_BIT;
   }
 
+  // Initialize all attachments to default unused.
+  // As we set layout(location=RT) in shaders we must always provide 4.
   VkAttachmentDescription attachments[5];
-  uint32_t attachment_count = 0;
+  for (int i = 0; i < 4; ++i) {
+    attachments[i].flags = VK_ATTACHMENT_DESCRIPTION_MAY_ALIAS_BIT;
+    attachments[i].format = VK_FORMAT_UNDEFINED;
+    attachments[i].samples = sample_count;
+    attachments[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachments[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[i].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachments[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[i].initialLayout = VK_IMAGE_LAYOUT_GENERAL;
+    attachments[i].finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+  }
+  auto& depth_stencil_attachment = attachments[4];
+  depth_stencil_attachment.flags = 0;
+  depth_stencil_attachment.format = VK_FORMAT_UNDEFINED;
+  depth_stencil_attachment.samples = sample_count;
+  depth_stencil_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+  depth_stencil_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  depth_stencil_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+  depth_stencil_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+  depth_stencil_attachment.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
+  depth_stencil_attachment.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-  // Configure attachments based on what's enabled. The shader interface still
-  // has 4 color output locations, but inactive ones must be marked unused so
-  // the same tile view is not bound multiple times in a subpass.
+  // Configure attachments based on what's enabled.
   VkAttachmentReference color_attachment_refs[4];
   for (int i = 0; i < 4; ++i) {
     auto& color_config = config.color[i];
-    auto& color_attachment_ref = color_attachment_refs[i];
-    color_attachment_ref.layout = VK_IMAGE_LAYOUT_GENERAL;
-    if (!color_config.used) {
-      color_attachment_ref.attachment = VK_ATTACHMENT_UNUSED;
-      continue;
-    }
-
-    color_attachment_ref.attachment = attachment_count;
-    auto& color_attachment = attachments[attachment_count++];
-    color_attachment.flags = 0;
-    color_attachment.format =
+    // TODO(benvanik): see how loose we can be with these.
+    attachments[i].format =
         ColorRenderTargetFormatToVkFormat(color_config.format);
-    color_attachment.samples = sample_count;
-    color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    color_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    color_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    color_attachment.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
-    color_attachment.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+    auto& color_attachment_ref = color_attachment_refs[i];
+    color_attachment_ref.attachment = i;
+    color_attachment_ref.layout = VK_IMAGE_LAYOUT_GENERAL;
   }
 
   // Configure depth.
   VkAttachmentReference depth_stencil_attachment_ref;
   depth_stencil_attachment_ref.layout = VK_IMAGE_LAYOUT_GENERAL;
+
   auto& depth_config = config.depth_stencil;
-  VkAttachmentReference* depth_stencil_attachment_ref_ptr = nullptr;
-  if (depth_config.used) {
-    depth_stencil_attachment_ref.attachment = attachment_count;
-    auto& depth_stencil_attachment = attachments[attachment_count++];
-    depth_stencil_attachment.flags = 0;
-    depth_stencil_attachment.format =
-        DepthRenderTargetFormatToVkFormat(depth_config.format);
-    depth_stencil_attachment.samples = sample_count;
-    depth_stencil_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    depth_stencil_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    depth_stencil_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    depth_stencil_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
-    depth_stencil_attachment.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
-    depth_stencil_attachment.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
-    depth_stencil_attachment_ref_ptr = &depth_stencil_attachment_ref;
-  }
+  depth_stencil_attachment_ref.attachment = 4;
+  depth_stencil_attachment.format =
+      DepthRenderTargetFormatToVkFormat(depth_config.format);
 
   // Single subpass that writes to our attachments.
+  // FIXME: "Multiple attachments that alias the same memory must not be used in
+  // a single subpass"
   // TODO: Input attachment for depth/stencil reads?
   VkSubpassDescription subpass_info;
   subpass_info.flags = 0;
@@ -511,7 +508,7 @@ VkResult CachedRenderPass::Initialize() {
   subpass_info.colorAttachmentCount = 4;
   subpass_info.pColorAttachments = color_attachment_refs;
   subpass_info.pResolveAttachments = nullptr;
-  subpass_info.pDepthStencilAttachment = depth_stencil_attachment_ref_ptr;
+  subpass_info.pDepthStencilAttachment = &depth_stencil_attachment_ref;
   subpass_info.preserveAttachmentCount = 0;
   subpass_info.pPreserveAttachments = nullptr;
 
@@ -521,7 +518,7 @@ VkResult CachedRenderPass::Initialize() {
   render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
   render_pass_info.pNext = nullptr;
   render_pass_info.flags = 0;
-  render_pass_info.attachmentCount = attachment_count;
+  render_pass_info.attachmentCount = 5;
   render_pass_info.pAttachments = attachments;
   render_pass_info.subpassCount = 1;
   render_pass_info.pSubpasses = &subpass_info;
@@ -552,19 +549,11 @@ bool CachedRenderPass::IsCompatible(
 
   for (int i = 0; i < 4; ++i) {
     // TODO(benvanik): allow compatible vulkan formats.
-    if (config.color[i].used != desired_config.color[i].used) {
-      return false;
-    }
-    if (config.color[i].used &&
-        config.color[i].format != desired_config.color[i].format) {
+    if (config.color[i].format != desired_config.color[i].format) {
       return false;
     }
   }
-  if (config.depth_stencil.used != desired_config.depth_stencil.used) {
-    return false;
-  }
-  if (config.depth_stencil.used &&
-      config.depth_stencil.format != desired_config.depth_stencil.format) {
+  if (config.depth_stencil.format != desired_config.depth_stencil.format) {
     return false;
   }
   return true;
@@ -673,7 +662,6 @@ bool RenderCache::dirty() const {
   dirty |= cur_regs.rb_color1_info.value != regs[XE_GPU_REG_RB_COLOR1_INFO].u32;
   dirty |= cur_regs.rb_color2_info.value != regs[XE_GPU_REG_RB_COLOR2_INFO].u32;
   dirty |= cur_regs.rb_color3_info.value != regs[XE_GPU_REG_RB_COLOR3_INFO].u32;
-  dirty |= cur_regs.rb_color_mask != regs[XE_GPU_REG_RB_COLOR_MASK].u32;
   dirty |= cur_regs.rb_depth_info.value != regs[XE_GPU_REG_RB_DEPTH_INFO].u32;
   dirty |= cur_regs.pa_sc_window_scissor_tl !=
            regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL].u32;
@@ -710,26 +698,12 @@ const RenderState* RenderCache::BeginRenderPass(VkCommandBuffer command_buffer,
       SetShadowRegister(&regs.rb_color2_info.value, XE_GPU_REG_RB_COLOR2_INFO);
   dirty |=
       SetShadowRegister(&regs.rb_color3_info.value, XE_GPU_REG_RB_COLOR3_INFO);
-  dirty |= SetShadowRegister(&regs.rb_color_mask, XE_GPU_REG_RB_COLOR_MASK);
   dirty |=
       SetShadowRegister(&regs.rb_depth_info.value, XE_GPU_REG_RB_DEPTH_INFO);
   dirty |= SetShadowRegister(&regs.pa_sc_window_scissor_tl,
                              XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL);
   dirty |= SetShadowRegister(&regs.pa_sc_window_scissor_br,
                              XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR);
-  uint32_t pixel_shader_color_targets = 0xF;
-  if (pixel_shader) {
-    pixel_shader_color_targets = 0;
-    for (uint32_t i = 0; i < 4; ++i) {
-      if (pixel_shader->writes_color_target(i)) {
-        pixel_shader_color_targets |= 1u << i;
-      }
-    }
-  }
-  if (regs.pixel_shader_color_targets != pixel_shader_color_targets) {
-    regs.pixel_shader_color_targets = pixel_shader_color_targets;
-    dirty = true;
-  }
   if (!dirty && current_state_.render_pass) {
     // No registers have changed so we can reuse the previous render pass -
     // just begin with what we had.
@@ -792,10 +766,10 @@ const RenderState* RenderCache::BeginRenderPass(VkCommandBuffer command_buffer,
   render_pass_begin_info.renderArea.extent.width = config->surface_pitch_px;
   render_pass_begin_info.renderArea.extent.height = config->surface_height_px;
 
-  if (config->surface_msaa == MsaaSamples::k2X) {
+  if (config->surface_msaa == xenos::MsaaSamples::k2X) {
     render_pass_begin_info.renderArea.extent.height =
         std::min(config->surface_height_px * 2, 2560u);
-  } else if (config->surface_msaa == MsaaSamples::k4X) {
+  } else if (config->surface_msaa == xenos::MsaaSamples::k4X) {
     render_pass_begin_info.renderArea.extent.width *= 2;
     render_pass_begin_info.renderArea.extent.height =
         std::min(config->surface_height_px * 2, 2560u);
@@ -814,8 +788,6 @@ const RenderState* RenderCache::BeginRenderPass(VkCommandBuffer command_buffer,
 }
 
 bool RenderCache::ParseConfiguration(RenderConfiguration* config) {
-  std::memset(config, 0, sizeof(*config));
-
   auto& regs = shadow_registers_;
 
   // RB_MODECONTROL
@@ -853,28 +825,11 @@ bool RenderCache::ParseConfiguration(RenderConfiguration* config) {
     for (int i = 0; i < 4; ++i) {
       config->color[i].edram_base = color_info[i].color_base;
       config->color[i].format = GetBaseRTFormat(color_info[i].color_format);
-      uint32_t color_write_mask = (regs.rb_color_mask >> (i * 4)) & 0xF;
-      config->color[i].used =
-          color_write_mask && (regs.pixel_shader_color_targets & (1u << i));
-    }
-
-    for (int i = 0; i < 4; ++i) {
-      if (!config->color[i].used) {
-        continue;
-      }
-      for (int j = 0; j < i; ++j) {
-        if (config->color[j].used &&
-            config->color[j].edram_base == config->color[i].edram_base &&
-            config->color[j].format == config->color[i].format) {
-          config->color[i].used = false;
-          break;
-        }
-      }
     }
   } else {
     for (int i = 0; i < 4; ++i) {
       config->color[i].edram_base = 0;
-      config->color[i].format = ColorRenderTargetFormat::k_8_8_8_8;
+      config->color[i].format = xenos::ColorRenderTargetFormat::k_8_8_8_8;
       config->color[i].used = false;
     }
   }
@@ -884,10 +839,9 @@ bool RenderCache::ParseConfiguration(RenderConfiguration* config) {
       config->mode_control == ModeControl::kDepth) {
     config->depth_stencil.edram_base = regs.rb_depth_info.depth_base;
     config->depth_stencil.format = regs.rb_depth_info.depth_format;
-    config->depth_stencil.used = true;
   } else {
     config->depth_stencil.edram_base = 0;
-    config->depth_stencil.format = DepthRenderTargetFormat::kD24S8;
+    config->depth_stencil.format = xenos::DepthRenderTargetFormat::kD24S8;
     config->depth_stencil.used = false;
   }
 
@@ -917,7 +871,7 @@ bool RenderCache::ConfigureRenderPass(VkCommandBuffer command_buffer,
     render_pass = new CachedRenderPass(*device_, *config);
     VkResult status = render_pass->Initialize();
     if (status != VK_SUCCESS) {
-      XELOGE("%s: Failed to create render pass, status %s", __func__,
+      XELOGE("{}: Failed to create render pass, status {}", __func__,
              ui::vulkan::to_string(status));
       delete render_pass;
       return false;
@@ -939,16 +893,14 @@ bool RenderCache::ConfigureRenderPass(VkCommandBuffer command_buffer,
 
   // If no framebuffer was found in the cache create a new one.
   if (!framebuffer) {
-    uint32_t tile_width = config->surface_msaa == MsaaSamples::k4X ? 40 : 80;
-    uint32_t tile_height = config->surface_msaa != MsaaSamples::k1X ? 8 : 16;
+    uint32_t tile_width =
+        config->surface_msaa == xenos::MsaaSamples::k4X ? 40 : 80;
+    uint32_t tile_height =
+        config->surface_msaa != xenos::MsaaSamples::k1X ? 8 : 16;
 
     CachedTileView* target_color_attachments[4] = {nullptr, nullptr, nullptr,
                                                    nullptr};
     for (int i = 0; i < 4; ++i) {
-      if (!config->color[i].used) {
-        continue;
-      }
-
       TileViewKey color_key;
       color_key.tile_offset = config->color[i].edram_base;
       color_key.tile_width =
@@ -968,32 +920,29 @@ bool RenderCache::ConfigureRenderPass(VkCommandBuffer command_buffer,
       }
     }
 
-    CachedTileView* target_depth_stencil_attachment = nullptr;
-    if (config->depth_stencil.used) {
-      TileViewKey depth_stencil_key;
-      depth_stencil_key.tile_offset = config->depth_stencil.edram_base;
-      depth_stencil_key.tile_width =
-          xe::round_up(config->surface_pitch_px, tile_width) / tile_width;
-      // depth_stencil_key.tile_height =
-      //     xe::round_up(config->surface_height_px, tile_height) / tile_height;
-      depth_stencil_key.tile_height = 160;
-      depth_stencil_key.color_or_depth = 0;
-      depth_stencil_key.msaa_samples =
-          0;  // static_cast<uint16_t>(config->surface_msaa);
-      depth_stencil_key.edram_format =
-          static_cast<uint16_t>(config->depth_stencil.format);
-      target_depth_stencil_attachment =
-          FindOrCreateTileView(command_buffer, depth_stencil_key);
-      if (!target_depth_stencil_attachment) {
-        XELOGE("Failed to get tile view for depth/stencil attachment");
-        return false;
-      }
+    TileViewKey depth_stencil_key;
+    depth_stencil_key.tile_offset = config->depth_stencil.edram_base;
+    depth_stencil_key.tile_width =
+        xe::round_up(config->surface_pitch_px, tile_width) / tile_width;
+    // depth_stencil_key.tile_height =
+    //     xe::round_up(config->surface_height_px, tile_height) / tile_height;
+    depth_stencil_key.tile_height = 160;
+    depth_stencil_key.color_or_depth = 0;
+    depth_stencil_key.msaa_samples =
+        0;  // static_cast<uint16_t>(config->surface_msaa);
+    depth_stencil_key.edram_format =
+        static_cast<uint16_t>(config->depth_stencil.format);
+    auto target_depth_stencil_attachment =
+        FindOrCreateTileView(command_buffer, depth_stencil_key);
+    if (!target_depth_stencil_attachment) {
+      XELOGE("Failed to get tile view for depth/stencil attachment");
+      return false;
     }
 
-    uint32_t surface_pitch_px = config->surface_msaa != MsaaSamples::k4X
+    uint32_t surface_pitch_px = config->surface_msaa != xenos::MsaaSamples::k4X
                                     ? config->surface_pitch_px
                                     : config->surface_pitch_px * 2;
-    uint32_t surface_height_px = config->surface_msaa == MsaaSamples::k1X
+    uint32_t surface_height_px = config->surface_msaa == xenos::MsaaSamples::k1X
                                      ? config->surface_height_px
                                      : config->surface_height_px * 2;
     surface_pitch_px = std::min(surface_pitch_px, 2560u);
@@ -1003,7 +952,7 @@ bool RenderCache::ConfigureRenderPass(VkCommandBuffer command_buffer,
         target_color_attachments, target_depth_stencil_attachment);
     VkResult status = framebuffer->Initialize();
     if (status != VK_SUCCESS) {
-      XELOGE("%s: Failed to create framebuffer, status %s", __func__,
+      XELOGE("{}: Failed to create framebuffer, status {}", __func__,
              ui::vulkan::to_string(status));
       delete framebuffer;
       return false;
@@ -1018,16 +967,16 @@ bool RenderCache::ConfigureRenderPass(VkCommandBuffer command_buffer,
 }
 
 CachedTileView* RenderCache::FindTileView(uint32_t base, uint32_t pitch,
-                                          MsaaSamples samples,
+                                          xenos::MsaaSamples samples,
                                           bool color_or_depth,
                                           uint32_t format) {
-  uint32_t tile_width = samples == MsaaSamples::k4X ? 40 : 80;
-  uint32_t tile_height = samples != MsaaSamples::k1X ? 8 : 16;
+  uint32_t tile_width = samples == xenos::MsaaSamples::k4X ? 40 : 80;
+  uint32_t tile_height = samples != xenos::MsaaSamples::k1X ? 8 : 16;
 
   if (color_or_depth) {
     // Adjust similar formats for easier matching.
     format = static_cast<uint32_t>(
-        GetBaseRTFormat(static_cast<ColorRenderTargetFormat>(format)));
+        GetBaseRTFormat(static_cast<xenos::ColorRenderTargetFormat>(format)));
   }
 
   TileViewKey key;
@@ -1040,22 +989,6 @@ CachedTileView* RenderCache::FindTileView(uint32_t base, uint32_t pitch,
   auto view = FindTileView(key);
   if (view) {
     return view;
-  }
-
-  if (color_or_depth) {
-    for (auto it = cached_tile_views_.rbegin(); it != cached_tile_views_.rend();
-         ++it) {
-      auto tile_view = *it;
-      if (!tile_view->key.color_or_depth) {
-        continue;
-      }
-      if (tile_view->key.tile_offset == key.tile_offset &&
-          tile_view->key.tile_width == key.tile_width &&
-          tile_view->key.tile_height == key.tile_height &&
-          tile_view->key.msaa_samples == key.msaa_samples) {
-        return tile_view;
-      }
-    }
   }
 
   return nullptr;
@@ -1072,7 +1005,7 @@ CachedTileView* RenderCache::FindOrCreateTileView(
   tile_view = new CachedTileView(device_, edram_memory_, view_key);
   VkResult status = tile_view->Initialize(command_buffer);
   if (status != VK_SUCCESS) {
-    XELOGE("%s: Failed to create tile view, status %s", __func__,
+    XELOGE("{}: Failed to create tile view, status {}", __func__,
            ui::vulkan::to_string(status));
 
     delete tile_view;
@@ -1087,9 +1020,9 @@ void RenderCache::UpdateTileView(VkCommandBuffer command_buffer,
                                  CachedTileView* view, bool load,
                                  bool insert_barrier) {
   uint32_t tile_width =
-      view->key.msaa_samples == uint16_t(MsaaSamples::k4X) ? 40 : 80;
+      view->key.msaa_samples == uint16_t(xenos::MsaaSamples::k4X) ? 40 : 80;
   uint32_t tile_height =
-      view->key.msaa_samples != uint16_t(MsaaSamples::k1X) ? 8 : 16;
+      view->key.msaa_samples != uint16_t(xenos::MsaaSamples::k1X) ? 8 : 16;
 
   if (insert_barrier) {
     VkBufferMemoryBarrier barrier;
@@ -1272,7 +1205,7 @@ void RenderCache::RawCopyToImage(VkCommandBuffer command_buffer,
 
 void RenderCache::BlitToImage(VkCommandBuffer command_buffer,
                               uint32_t edram_base, uint32_t pitch,
-                              uint32_t height, MsaaSamples num_samples,
+                              uint32_t height, xenos::MsaaSamples num_samples,
                               VkImage image, VkImageLayout image_layout,
                               bool color_or_depth, uint32_t format,
                               VkFilter filter, VkOffset3D offset,
@@ -1280,11 +1213,11 @@ void RenderCache::BlitToImage(VkCommandBuffer command_buffer,
   if (color_or_depth) {
     // Adjust similar formats for easier matching.
     format = static_cast<uint32_t>(
-        GetBaseRTFormat(static_cast<ColorRenderTargetFormat>(format)));
+        GetBaseRTFormat(static_cast<xenos::ColorRenderTargetFormat>(format)));
   }
 
-  uint32_t tile_width = num_samples == MsaaSamples::k4X ? 40 : 80;
-  uint32_t tile_height = num_samples != MsaaSamples::k1X ? 8 : 16;
+  uint32_t tile_width = num_samples == xenos::MsaaSamples::k4X ? 40 : 80;
+  uint32_t tile_height = num_samples != xenos::MsaaSamples::k1X ? 8 : 16;
 
   // Grab a tile view that represents the source image.
   TileViewKey key;
@@ -1376,17 +1309,18 @@ void RenderCache::BlitToImage(VkCommandBuffer command_buffer,
 
 void RenderCache::ClearEDRAMColor(VkCommandBuffer command_buffer,
                                   uint32_t edram_base,
-                                  ColorRenderTargetFormat format,
+                                  xenos::ColorRenderTargetFormat format,
                                   uint32_t pitch, uint32_t height,
-                                  MsaaSamples num_samples, float* color) {
+                                  xenos::MsaaSamples num_samples,
+                                  float* color) {
   // TODO: For formats <= 4 bpp, we can directly fill the EDRAM buffer. Just
   // need to detect this and calculate a value.
 
   // Adjust similar formats for easier matching.
-  format = GetBaseRTFormat(static_cast<ColorRenderTargetFormat>(format));
+  format = GetBaseRTFormat(static_cast<xenos::ColorRenderTargetFormat>(format));
 
-  uint32_t tile_width = num_samples == MsaaSamples::k4X ? 40 : 80;
-  uint32_t tile_height = num_samples != MsaaSamples::k1X ? 8 : 16;
+  uint32_t tile_width = num_samples == xenos::MsaaSamples::k4X ? 40 : 80;
+  uint32_t tile_height = num_samples != xenos::MsaaSamples::k1X ? 8 : 16;
 
   // Grab a tile view (as we need to clear an image first)
   TileViewKey key;
@@ -1414,15 +1348,15 @@ void RenderCache::ClearEDRAMColor(VkCommandBuffer command_buffer,
 
 void RenderCache::ClearEDRAMDepthStencil(VkCommandBuffer command_buffer,
                                          uint32_t edram_base,
-                                         DepthRenderTargetFormat format,
+                                         xenos::DepthRenderTargetFormat format,
                                          uint32_t pitch, uint32_t height,
-                                         MsaaSamples num_samples, float depth,
-                                         uint32_t stencil) {
+                                         xenos::MsaaSamples num_samples,
+                                         float depth, uint32_t stencil) {
   // TODO: For formats <= 4 bpp, we can directly fill the EDRAM buffer. Just
   // need to detect this and calculate a value.
 
-  uint32_t tile_width = num_samples == MsaaSamples::k4X ? 40 : 80;
-  uint32_t tile_height = num_samples != MsaaSamples::k1X ? 8 : 16;
+  uint32_t tile_width = num_samples == xenos::MsaaSamples::k4X ? 40 : 80;
+  uint32_t tile_height = num_samples != xenos::MsaaSamples::k1X ? 8 : 16;
 
   // Grab a tile view (as we need to clear an image first)
   TileViewKey key;

@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2018 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -31,13 +31,13 @@ bool D3D12GraphicsSystem::IsAvailable() {
   return xe::ui::d3d12::D3D12Provider::IsD3D12APIAvailable();
 }
 
-std::wstring D3D12GraphicsSystem::name() const {
+std::string D3D12GraphicsSystem::name() const {
   auto d3d12_command_processor =
       static_cast<D3D12CommandProcessor*>(command_processor());
   if (d3d12_command_processor != nullptr) {
     return d3d12_command_processor->GetWindowTitleText();
   }
-  return L"Direct3D 12";
+  return "Direct3D 12";
 }
 
 X_STATUS D3D12GraphicsSystem::Setup(cpu::Processor* processor,
@@ -96,7 +96,7 @@ X_STATUS D3D12GraphicsSystem::Setup(cpu::Processor* processor,
   stretch_root_desc.Flags =
       D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS;
   stretch_root_signature_ =
-      ui::d3d12::util::CreateRootSignature(d3d12_provider, stretch_root_desc);
+      ui::d3d12::util::CreateRootSignature(*d3d12_provider, stretch_root_desc);
   if (stretch_root_signature_ == nullptr) {
     XELOGE("Failed to create the front buffer stretch root signature");
     return X_STATUS_UNSUCCESSFUL;
@@ -123,7 +123,7 @@ X_STATUS D3D12GraphicsSystem::Setup(cpu::Processor* processor,
   stretch_root_desc.NumParameters = 3;
   stretch_root_desc.pParameters = stretch_root_parameters;
   stretch_gamma_root_signature_ =
-      ui::d3d12::util::CreateRootSignature(d3d12_provider, stretch_root_desc);
+      ui::d3d12::util::CreateRootSignature(*d3d12_provider, stretch_root_desc);
   if (stretch_gamma_root_signature_ == nullptr) {
     XELOGE(
         "Failed to create the gamma-correcting front buffer stretch root "
@@ -190,10 +190,13 @@ void D3D12GraphicsSystem::Shutdown() {
   GraphicsSystem::Shutdown();
 }
 
-void D3D12GraphicsSystem::AwaitFrontBufferUnused() {
-  if (display_context_ != nullptr) {
-    display_context_->AwaitAllFramesCompletion();
+std::unique_ptr<xe::ui::RawImage> D3D12GraphicsSystem::Capture() {
+  auto d3d12_command_processor =
+      static_cast<D3D12CommandProcessor*>(command_processor());
+  if (!d3d12_command_processor) {
+    return nullptr;
   }
+  return d3d12_command_processor->Capture();
 }
 
 void D3D12GraphicsSystem::StretchTextureToFrontBuffer(
