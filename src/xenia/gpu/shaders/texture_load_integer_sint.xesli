@@ -1,0 +1,39 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2026 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#ifndef XENIA_GPU_SHADERS_TEXTURE_LOAD_INTEGER_SINT_XESLI_
+#define XENIA_GPU_SHADERS_TEXTURE_LOAD_INTEGER_SINT_XESLI_
+
+#include "texture_load.xesli"
+
+// Sign-extend the lowest N bits of bits to a full INT32, then convert to float.
+// Used for kIntegerFloat32 derived resources so that exact INT32 values survive
+// the FP32 round trip.
+
+float XeIntegerS2ToFloat(uint bits) {
+  return float(int(bits << 30u) >> 30);
+}
+
+float XeIntegerS8ToFloat(uint bits) {
+  return float(int(bits << 24u) >> 24);
+}
+
+float XeIntegerS10ToFloat(uint bits) {
+  return float(int(bits << 22u) >> 22);
+}
+
+float XeIntegerS11ToFloat(uint bits) {
+  return float(int(bits << 21u) >> 21);
+}
+
+float XeIntegerS16ToFloat(uint bits) {
+  return float(int(bits << 16u) >> 16);
+}
+
+#endif  // XENIA_GPU_SHADERS_TEXTURE_LOAD_INTEGER_SINT_XESLI_

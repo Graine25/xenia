@@ -1,0 +1,43 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2026 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#include "texture_load_integer_sint.xesli"
+
+XE_TEXTURE_LOAD_ENTRY(16) {
+  // 1 thread = 1 block
+  // k_2_10_10_10 32bpb -> RGBA32_FLOAT
+  // R = bits[9:0] (10)
+  // G = bits[19:10] (10) 
+  // B = bits[29:20] (10)
+  // A = bits[31:30] (2)
+  XeTextureLoadInfo load_info = XeTextureLoadGetInfo(pass_push_consts_xe);
+  uint3_xe block_index = in_global_thread_id_xe;
+  dont_flatten_xe if (any(greater_than_equal_xe(block_index.xy,
+                                                load_info.size_blocks.xy))) {
+    return;
+  }
+  uint block_offset_host =
+      load_info.host_offset +
+      uint(XeTextureHostLinearOffset(int3_xe(block_index), load_info.host_pitch,
+                                     load_info.size_blocks.y, 16u));
+  uint block_offset_guest =
+      XeTextureLoadSourceAddress(load_info, block_index, 2u);
+  uint4_xe guest = XeEndianSwap32(
+      byte_buffer_align16_load16_xe(xe_texture_load_source, block_offset_guest),
+      load_info.endian_32);
+  uint packed = guest.x;
+  uint4_xe expanded;
+  expanded.x = float_bits_to_uint_xe(XeIntegerS10ToFloat(packed & 0x3FFu));
+  expanded.y = float_bits_to_uint_xe(XeIntegerS10ToFloat((packed >> 10u) & 0x3FFu));
+  expanded.z = float_bits_to_uint_xe(XeIntegerS10ToFloat((packed >> 20u) & 0x3FFu));
+  expanded.w = float_bits_to_uint_xe(XeIntegerS2ToFloat(packed >> 30u));
+  byte_buffer_align16_store16_xe(xe_texture_load_dest, block_offset_host,
+                                 expanded);
+}
+entry_code_end_compute_xe
