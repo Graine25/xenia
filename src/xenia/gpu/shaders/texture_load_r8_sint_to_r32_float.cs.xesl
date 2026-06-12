@@ -28,7 +28,7 @@ XE_TEXTURE_LOAD_ENTRY(16) {
   uint4_xe guest =
       byte_buffer_align16_load16_xe(xe_texture_load_source, block_offset_guest);
   // guest.x: block0 in [7:0], block1 in [15:8],
-  /           block2 in [23:16], block3 in [31:24]
+  //          block2 in [23:16], block3 in [31:24]
   uint packed = guest.x;
   uint4_xe expanded;
   expanded.x = float_bits_to_uint_xe(XeIntegerS8ToFloat(packed & 0xFFu));
