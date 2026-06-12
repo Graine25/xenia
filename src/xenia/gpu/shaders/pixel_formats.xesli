@@ -204,7 +204,7 @@ uint2_xe XePackR16G16B16A16Edram(float4_xe f) {
 
 uint2_xe XePack16bpp4PixelsInUInt2(float4_xe pixel_0, float4_xe pixel_1,
                                    float4_xe pixel_2, float4_xe pixel_3,
-                                   uuint format, uint number_format) {
+                                   uint format, uint number_format) {
   uint2_xe packed;
   switch (format) {
     case kXenosFormat_1_5_5_5:
