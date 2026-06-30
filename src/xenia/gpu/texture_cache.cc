@@ -338,6 +338,8 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
     TextureBinding& binding = texture_bindings_[index];
     xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(index);
     TextureKey old_key = binding.key;
+    xenos::TextureFormat old_guest_format = binding.guest_format;
+    TextureNumFormat old_num_format = binding.num_format;
     uint8_t old_swizzled_signs = binding.swizzled_signs;
     const bool binding_was_outdated =
         old_key.is_valid && IsBindingOutdatedForUse(binding);
@@ -350,6 +352,10 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
       binding.Reset();
       continue;
     }
+    // The key is storage identity. Keep the guest format and num_format around
+    // for shader constants and backend view choices.
+    binding.guest_format = fetch.format;
+    binding.num_format = GetNumFormat(fetch.num_format);
     uint32_t old_host_swizzle = binding.host_swizzle;
     binding.host_swizzle =
         GuestToHostSwizzle(fetch.swizzle, GetHostFormatSwizzle(binding.key));
@@ -366,9 +372,11 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
         texture_util::IsAnySignNotSigned(binding.swizzled_signs);
     bool any_sign_is_signed =
         texture_util::IsAnySignSigned(binding.swizzled_signs);
-    if (key_changed || binding.host_swizzle != old_host_swizzle ||
+    if (key_changed || binding.guest_format != old_guest_format ||
+        binding.num_format != old_num_format ||
+        binding.host_swizzle != old_host_swizzle ||
         any_sign_is_not_signed != any_sign_was_not_signed ||
-        any_sign_is_signed != any_sign_was_signed) {
+        any_sign_is_signed != any_sign_was_signed || binding_was_outdated) {
       bindings_changed |= index_bit;
     }
     bool load_unsigned_data = false, load_signed_data = false;
@@ -657,14 +665,16 @@ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
       IsScaledResolveSupportedForFormat(key)) {
     texture_util::TextureGuestLayout scaled_resolve_guest_layout =
         key.GetGuestLayout();
-    if ((scaled_resolve_guest_layout.base.level_data_extent_bytes &&
+    bool overlaps_scaled_resolve =
+        (scaled_resolve_guest_layout.base.level_data_extent_bytes &&
          IsRangeScaledResolved(
              key.base_page << 12,
              scaled_resolve_guest_layout.base.level_data_extent_bytes)) ||
         (scaled_resolve_guest_layout.mips_total_extent_bytes &&
          IsRangeScaledResolved(
              key.mip_page << 12,
-             scaled_resolve_guest_layout.mips_total_extent_bytes))) {
+             scaled_resolve_guest_layout.mips_total_extent_bytes));
+    if (overlaps_scaled_resolve) {
       key.scaled_resolve = 1;
     }
   }
@@ -712,6 +722,78 @@ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
   texture->LogAction("Created");
   return texture;
 }
+
+uint32_t TextureCache::GetIntegerScaleBits(xenos::TextureFormat guest_format,
+                                           TextureNumFormat num_format,
+                                           uint32_t host_swizzle,
+                                           uint8_t swizzled_signs) {
+  if (num_format != TextureNumFormat::kInteger) {
+    return 0;
+  }
+  if (!FormatInfo::Get(guest_format)->fixed) {
+    return 0;
+  }
+  uint32_t scale_bits = 0;
+  for (uint32_t i = 0; i < 4; ++i) {
+    uint32_t source_component = (host_swizzle >> (i * 3)) & 0b111;
+    if (source_component >= xenos::XE_GPU_TEXTURE_SWIZZLE_0) {
+      continue;
+    }
+    xenos::TextureSign sign =
+        xenos::TextureSign((swizzled_signs >> (i * 2)) & 0b11);
+    scale_bits |= GetFetchIntegerScaleBits(guest_format, source_component, sign)
+                  << (i * 5);
+  }
+  return scale_bits;
+}
+
+bool TextureCache::PrepareTextureLoad(Texture& texture, bool load_base,
+                                      bool load_mips) {
+  assert_true(load_base || load_mips);
+  TextureKey texture_key = texture.key();
+
+  // bits (R32G32B32A32_UINT), so aligning the size to this value to make sure
+  // if the texture is small (especially if it's linear), the last blocks won't
+  // be cut off (hosts may return 0, 0, 0, 0 for the whole R32G32B32A32_UINT
+  // access for the non-16-aligned tail even if 1...15 bytes are actually
+  // provided for it).
+
+  // Request uploading of the texture data to the shared memory.
+  // This is also necessary when resolution scaling is used - the texture cache
+  // relies on shared memory for invalidation of both unscaled and scaled
+  // textures. Plus a texture may be unscaled partially, when only a portion of
+  // its pages is invalidated, in this case we'll need the texture from the
+  // shared memory to load the unscaled parts.
+  // TODO(Triang3l): Load unscaled parts.
+  if (load_base) {
+    if (!shared_memory().RequestRange(
+            texture_key.base_page << 12,
+            xe::align(texture.GetGuestBaseSize(), UINT32_C(16)))) {
+      return false;
+    }
+  }
+  if (load_mips) {
+    if (!shared_memory().RequestRange(
+            texture_key.mip_page << 12,
+            xe::align(texture.GetGuestMipsSize(), UINT32_C(16)))) {
+      return false;
+    }
+  }
+  if (texture_key.scaled_resolve) {
+    // Make sure all the scaled resolve memory is resident and accessible from
+    // the shader, including padding not yet touched by an actual resolve.
+    if (!EnsureScaledResolveMemoryCommitted(texture_key.base_page << 12,
+                                            texture.GetGuestBaseSize(), 4)) {
+      return false;
+    }
+    if (!EnsureScaledResolveMemoryCommitted(texture_key.mip_page << 12,
+                                            texture.GetGuestMipsSize(), 4)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
   assert_true(n_textures <= 64);
   if (n_textures < 2) {
@@ -746,8 +828,8 @@ void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
     for (uint32_t i = 0; i < n_textures; ++i) {
       Texture* current = textures[i];
 
-      auto base_outdated = current->base_outdated(global_lock);
-      auto mips_outdated = current->mips_outdated(global_lock);
+      bool base_outdated = current->base_outdated(global_lock);
+      bool mips_outdated = current->mips_outdated(global_lock);
 
       index_base_outdated |= static_cast<uint64_t>(base_outdated) << i;
       index_mips_outdated |= static_cast<uint64_t>(mips_outdated) << i;
@@ -772,58 +854,18 @@ void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
     textures[i] = nullptr;
     Texture& texture = *p_texture;
 
-    TextureKey texture_key = texture.key();
-    // Implementation may load multiple blocks at once via accesses of up to 128
-    // bits (R32G32B32A32_UINT), so aligning the size to this value to make sure
-    // if the texture is small (especially if it's linear), the last blocks
-    // won't be cut off (hosts may return 0, 0, 0, 0 for the whole
-    // R32G32B32A32_UINT access for the non-16-aligned tail even if 1...15 bytes
-    // are actually provided for it).
-
-    // Request uploading of the texture data to the shared memory.
-    // This is also necessary when resolution scaling is used - the texture
-    // cache relies on shared memory for invalidation of both unscaled and
-    // scaled textures. Plus a texture may be unscaled partially, when only a
-    // portion of its pages is invalidated, in this case we'll need the texture
-    // from the shared memory to load the unscaled parts.
-    // TODO(Triang3l): Load unscaled parts.
-    if (index_base_outdated & (1ULL << i)) {
-      if (!shared_memory().RequestRange(
-              texture_key.base_page << 12,
-              xe::align(texture.GetGuestBaseSize(), UINT32_C(16)))) {
-        continue;
-      }
-    }
-    if (index_mips_outdated & (1ULL << i)) {
-      if (!shared_memory().RequestRange(
-              texture_key.mip_page << 12,
-              xe::align(texture.GetGuestMipsSize(), UINT32_C(16)))) {
-        continue;
-      }
-    }
-    if (texture_key.scaled_resolve) {
-      // Make sure all the scaled resolve memory is resident and accessible from
-      // the shader, including any possible padding that hasn't yet been touched
-      // by an actual resolve, but is still included in the texture size, so the
-      // GPU won't be trying to access unmapped memory.
-      if (!EnsureScaledResolveMemoryCommitted(texture_key.base_page << 12,
-                                              texture.GetGuestBaseSize(), 4)) {
-        continue;
-      }
-      if (!EnsureScaledResolveMemoryCommitted(texture_key.mip_page << 12,
-                                              texture.GetGuestMipsSize(), 4)) {
-        continue;
-      }
-    }
-
-    // Actually load the texture data.
-    if (!LoadTextureDataFromResidentMemoryImpl(
-            texture, (index_base_outdated & (1ULL << i)) != 0,
-            (index_mips_outdated & (1ULL << i)) != 0)) {
+    bool base_outdated = (index_base_outdated & (1ULL << i)) != 0;
+    bool mips_outdated = (index_mips_outdated & (1ULL << i)) != 0;
+    if (!PrepareTextureLoad(texture, base_outdated, mips_outdated)) {
       continue;
     }
 
-    // reque for makeuptodatandwatch
+    if (!LoadTextureDataFromResidentMemoryImpl(texture, base_outdated,
+                                               mips_outdated)) {
+      continue;
+    }
+
+    // Queue the texture for finalization after the GPU upload work succeeds.
     textures[i] = &texture;
   }
   {
@@ -863,49 +905,8 @@ bool TextureCache::LoadTextureData(Texture& texture) {
     return true;
   }
 
-  TextureKey texture_key = texture.key();
-
-  // Implementation may load multiple blocks at once via accesses of up to 128
-  // bits (R32G32B32A32_UINT), so aligning the size to this value to make sure
-  // if the texture is small (especially if it's linear), the last blocks won't
-  // be cut off (hosts may return 0, 0, 0, 0 for the whole R32G32B32A32_UINT
-  // access for the non-16-aligned tail even if 1...15 bytes are actually
-  // provided for it).
-
-  // Request uploading of the texture data to the shared memory.
-  // This is also necessary when resolution scaling is used - the texture cache
-  // relies on shared memory for invalidation of both unscaled and scaled
-  // textures. Plus a texture may be unscaled partially, when only a portion of
-  // its pages is invalidated, in this case we'll need the texture from the
-  // shared memory to load the unscaled parts.
-  // TODO(Triang3l): Load unscaled parts.
-  if (base_outdated) {
-    if (!shared_memory().RequestRange(
-            texture_key.base_page << 12,
-            xe::align(texture.GetGuestBaseSize(), UINT32_C(16)))) {
-      return false;
-    }
-  }
-  if (mips_outdated) {
-    if (!shared_memory().RequestRange(
-            texture_key.mip_page << 12,
-            xe::align(texture.GetGuestMipsSize(), UINT32_C(16)))) {
-      return false;
-    }
-  }
-  if (texture_key.scaled_resolve) {
-    // Make sure all the scaled resolve memory is resident and accessible from
-    // the shader, including any possible padding that hasn't yet been touched
-    // by an actual resolve, but is still included in the texture size, so the
-    // GPU won't be trying to access unmapped memory.
-    if (!EnsureScaledResolveMemoryCommitted(texture_key.base_page << 12,
-                                            texture.GetGuestBaseSize(), 4)) {
-      return false;
-    }
-    if (!EnsureScaledResolveMemoryCommitted(texture_key.mip_page << 12,
-                                            texture.GetGuestMipsSize(), 4)) {
-      return false;
-    }
+  if (!PrepareTextureLoad(texture, base_outdated, mips_outdated)) {
+    return false;
   }
 
   // Actually load the texture data.

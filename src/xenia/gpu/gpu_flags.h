@@ -72,6 +72,12 @@ DECLARE_bool(ac6_ground_fix);
 
 DECLARE_bool(use_fuzzy_alpha_epsilon);
 
+DECLARE_bool(texture_clamp_point_only_filters);
+
+DECLARE_bool(resolve_check_number_format);
+
+DECLARE_bool(gamma_decode_pwl_resolve);
+
 #define XE_GPU_FINE_GRAINED_DRAW_SCOPES 1
 
 #endif  // XENIA_GPU_GPU_FLAGS_H_

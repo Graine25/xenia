@@ -220,3 +220,25 @@ DEFINE_bool(use_fuzzy_alpha_epsilon, false,
             "Use approximate compare for alpha values to prevent flickering on "
             "NVIDIA graphics cards",
             "GPU");
+
+DEFINE_bool(
+    texture_clamp_point_only_filters, true,
+    "Force point sampling and disable anisotropy for Xenos point-only "
+    "formats, mostly ordinary float/depth formats the console doesn't filter. "
+    "Disable to honor the requested filter on those formats instead.",
+    "GPU");
+
+DEFINE_bool(
+    resolve_check_number_format, false,
+    "Require the resolve dest number format to match before using the raw "
+    "fast copy. Mismatches go through the full copy shaders so signed/integer "
+    "dests get repacked instead of bit-copied. Off by default until more "
+    "games are checked.",
+    "GPU");
+
+DEFINE_bool(
+    gamma_decode_pwl_resolve, true,
+    "Decode 8_8_8_8_GAMMA to linear before MSAA averaging, then re-encode for "
+    "gamma dests. This better matches Xenos linear space blending. Disable "
+    "for the legacy byte averaging behavior.",
+    "GPU");

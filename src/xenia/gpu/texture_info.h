@@ -13,6 +13,7 @@
 #include <array>
 #include <cstring>
 #include <memory>
+#include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/xenos.h"
 
 namespace xe {
@@ -119,6 +120,17 @@ inline xenos::TextureFormat GetBaseFormat(xenos::TextureFormat texture_format) {
   return texture_format;
 }
 #endif
+enum class TextureNumFormat : uint8_t {
+  // num_format changes what fixed fetches return, not how the bytes are stored.
+  kFractional,
+  kInteger,
+};
+
+inline TextureNumFormat GetNumFormat(uint32_t num_format) {
+  return num_format ? TextureNumFormat::kInteger
+                    : TextureNumFormat::kFractional;
+}
+
 inline size_t GetTexelSize(xenos::TextureFormat format) {
   switch (format) {
     case xenos::TextureFormat::k_1_5_5_5:
@@ -128,12 +140,16 @@ inline size_t GetTexelSize(xenos::TextureFormat format) {
     case xenos::TextureFormat::k_4_4_4_4:
       return 2;
     case xenos::TextureFormat::k_5_6_5:
+    case xenos::TextureFormat::k_6_5_5:
       return 2;
     case xenos::TextureFormat::k_8:
+    case xenos::TextureFormat::k_8_A:
+    case xenos::TextureFormat::k_8_B:
       return 1;
     case xenos::TextureFormat::k_8_8:
       return 2;
     case xenos::TextureFormat::k_8_8_8_8:
+    case xenos::TextureFormat::k_8_8_8_8_A:
       return 4;
     case xenos::TextureFormat::k_16:
       return 4;
@@ -196,6 +212,16 @@ struct FormatInfo {
   const uint32_t block_height;
   const uint32_t bits_per_pixel;
 
+  // Fixed storage.
+  // Integer num_format can scale these back to guest integer units.
+  const bool fixed;
+  // Component widths in storage order.
+  // k_10_11_11 is R11G11B10, k_11_11_10 is R10G11B11, etc.
+  const uint8_t component_bits[4];
+  // Point-only sampling, matching Xenos. _EXPAND is left filterable as guest
+  // state, but its pre-filter conversion is future work.
+  const bool point_only;
+
   uint32_t bytes_per_block() const {
     return block_width * block_height * bits_per_pixel / 8;
   }
@@ -220,6 +246,58 @@ struct FormatInfo {
     return Get(static_cast<uint32_t>(format));
   }
 };
+
+// For an integer num_format fetch of a fixed-point format, the guest integer
+// range is restored in the translated shader by scaling the normalized host
+// value (ie returning [0, 255] rather than [0, 1]). Returns the per component
+// scale.
+// bits 0:3 = component_bits - 1
+// bit 4 = signed
+// 0 means no scale
+inline uint32_t GetFetchIntegerScaleBits(xenos::TextureFormat guest_format,
+                                         uint32_t component_index,
+                                         xenos::TextureSign sign) {
+  const FormatInfo& format_info = *FormatInfo::Get(guest_format);
+  if (!format_info.fixed || component_index >= 4 ||
+      sign == xenos::TextureSign::kGamma) {
+    return 0;
+  }
+  uint8_t component_bits = format_info.component_bits[component_index];
+  if (!component_bits || component_bits > 16) {
+    return 0;
+  }
+  uint32_t scale_bits = uint32_t(component_bits - 1);
+  if (sign == xenos::TextureSign::kSigned) {
+    scale_bits |= UINT32_C(1) << 4;
+  }
+  return scale_bits;
+}
+
+// Ordinary guest float/depth formats are point-only. _EXPAND stays filterable
+// as a guest format, but its pre-filter conversion is future work.
+inline bool FilterableTexture(xenos::TextureFormat guest_format) {
+  return !FormatInfo::Get(guest_format)->point_only;
+}
+
+inline void ClampFiltersForFormat(xenos::TextureFormat guest_format,
+                                  xenos::TextureFilter& mag_filter,
+                                  xenos::TextureFilter& min_filter,
+                                  xenos::TextureFilter& mip_filter,
+                                  xenos::AnisoFilter& aniso_filter) {
+  if (!cvars::texture_clamp_point_only_filters) {
+    // Honor the requested filter, even point-only formats.
+    return;
+  }
+  if (!FilterableTexture(guest_format)) {
+    // Keep base mip selection, but force point min/mag/mip and kill anisotropy.
+    mag_filter = xenos::TextureFilter::kPoint;
+    min_filter = xenos::TextureFilter::kPoint;
+    if (mip_filter != xenos::TextureFilter::kBaseMap) {
+      mip_filter = xenos::TextureFilter::kPoint;
+    }
+    aniso_filter = xenos::AnisoFilter::kDisabled;
+  }
+}
 
 struct TextureInfo;
 

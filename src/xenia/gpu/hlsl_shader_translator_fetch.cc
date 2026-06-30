@@ -1176,6 +1176,14 @@ void HlslShaderTranslator::ProcessTextureFetchInstruction(
           "XeApplyTextureSign(xe_tf_result_unsigned.w, xe_tf_result_signed.w, "
           "xe_tf_sign_w));");
       Outdent();
+      // Same ordering as DXBC: signs/gamma first, integer num_format next,
+      // ExpAdjust last.
+      EmitLine("xe_tf_result = XeApplyTextureIntegerScale(");
+      Indent();
+      EmitLine("xe_tf_result, xe_texture_integer_scale_bits[" +
+               std::to_string(fetch_constant_index >> 2) + "][" +
+               std::to_string(fetch_constant_index & 3) + "]);");
+      Outdent();
       EmitLine("xe_tf_result *= XeGetTextureFetchExpAdjust(" +
                fetch_constant_literal + ");");
     } else {
