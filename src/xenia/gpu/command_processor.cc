@@ -29,7 +29,7 @@
 #endif
 DEFINE_bool(
     log_guest_driven_gpu_register_written_values, false,
-    "Only does anything in debugging builds, if set will log every write to a gpu "
+    "Only does anything in debug builds, if set will log every write to a gpu "
     "register done by a guest. Does not log writes that are done by the CP on "
     "its own, just ones the guest makes or instructs it to make.",
     "GPU");
